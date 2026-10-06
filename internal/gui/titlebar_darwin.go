@@ -6,6 +6,8 @@ package gui
 #cgo CFLAGS: -x objective-c
 #cgo LDFLAGS: -framework Cocoa
 #import <Cocoa/Cocoa.h>
+#import <crt_externs.h>
+#import <mach-o/loader.h>
 #import <objc/runtime.h>
 
 static const NSWindowButton lightKinds[3] = {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton};
@@ -119,21 +121,43 @@ static NSEvent *firstPress(NSEvent *e) {
 	return e;
 }
 
-// The Mac's title bar with no toolbar (macOS 26 and later). The main window
-// has an empty toolbar only to inset the traffic lights into the page's
-// header (MacTitleBarHiddenInset), and from macOS 26 a window with a
+// Whether AppKit gives this program the design of macOS 26, where a toolbar
+// gives a window larger corners: from macOS 26, for a program linked against
+// the macOS 26 SDK or a later one, unless its Info.plist asks for the earlier
+// design (UIDesignRequiresCompatibility). Each is read at run time. The SDK is
+// the one the program names, which depends on the toolchain that linked it:
+// in LC_BUILD_VERSION, or in LC_VERSION_MIN_MACOSX in a program that runs on
+// macOS 10.13, as go build links one for an Intel Mac. The macOS version
+// isn't asked with @available(macOS 26.0, *): without make's flags, clang
+// compiles this code for the Mac's own macOS, though the program is linked to
+// run on earlier ones too, and on a Mac with macOS 26 the check would be
+// compiled away.
+static BOOL designOf26(void) {
+	if (![NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){26, 0, 0}]) return NO;
+	id compat = [NSBundle.mainBundle objectForInfoDictionaryKey:@"UIDesignRequiresCompatibility"];
+	if ([compat respondsToSelector:@selector(boolValue)] && [compat boolValue]) return NO;
+	const struct mach_header_64 *h = _NSGetMachExecuteHeader();
+	const struct load_command *c = (const struct load_command *)(h + 1);
+	for (uint32_t i = 0; i < h->ncmds; i++, c = (const struct load_command *)((const char *)c + c->cmdsize)) {
+		if (c->cmd == LC_BUILD_VERSION) return ((const struct build_version_command *)c)->sdk >= 0x1A0000; // 26.0
+		if (c->cmd == LC_VERSION_MIN_MACOSX) return ((const struct version_min_command *)c)->sdk >= 0x1A0000;
+	}
+	return NO;
+}
+
+// The Mac's title bar with no toolbar (the design of macOS 26). The main
+// window has an empty toolbar only to inset the traffic lights into the
+// page's header (MacTitleBarHiddenInset), and in that design a window with a
 // toolbar has the larger corners of one: the size of Finder's, where every
 // other window with a plain title bar has smaller ones (TextEdit's, and an
 // Electron app's that insets its lights by moving them). The toolbar is
-// taken off, and the lights are kept where it had them, so the header
-// still fits them. The window is left as it was on an older macOS, where a
-// toolbar doesn't change the corners, with its lights on the right (a
-// right-to-left language), or with a title bar not laid out as expected.
+// taken off, and the lights are kept where it had them, so the header still
+// fits them. The window is left as it was in the earlier design, where a
+// toolbar doesn't change the corners (see designOf26), with its lights on
+// the right (a right-to-left language), or with a title bar not laid out as
+// expected.
 static void insetLights(void *p) {
-	// Asked at run time: in a build for the Mac's own macOS, as go build
-	// makes one without make's flags, @available(macOS 26.0, *) is
-	// compiled away.
-	if (![NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){26, 0, 0}]) return;
+	if (!designOf26()) return;
 	NSWindow *w = (NSWindow *)p;
 	if (w.toolbar == nil || objc_getAssociatedObject(w, &lightsKey) != nil) return;
 	if (w.windowTitlebarLayoutDirection == NSUserInterfaceLayoutDirectionRightToLeft) return;
@@ -178,9 +202,9 @@ import "C"
 
 import "github.com/wailsapp/wails/v3/pkg/application"
 
-// plainTitlebar gives the main window, on macOS 26 and later, the corners
-// of a window with a plain title bar (see insetLights); the traffic lights
-// stay inset into the page's header.
+// plainTitlebar gives the main window, in the design of macOS 26, the
+// corners of a window with a plain title bar (see insetLights); the traffic
+// lights stay inset into the page's header.
 func plainTitlebar(w *application.WebviewWindow) {
 	application.InvokeSync(func() {
 		if p := w.NativeWindow(); p != nil {

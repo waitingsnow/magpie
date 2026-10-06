@@ -40,18 +40,38 @@ type titlebarRun struct {
 
 const titlebarMark = "titlebar run: "
 
+// The macOS SDKs a test runs the windows' program as linked against
+// (runAppKitSDK): AppKit gives one linked against macOS 26's or a later one
+// the design of macOS 26.
+const (
+	sdkMacOS15 uint32 = 15 << 16
+	sdkMacOS26 uint32 = 26 << 16
+)
+
 // The main window has the corners of a window with a plain title bar
-// (TextEdit's, an Electron app's), not a toolbar's: from macOS 26 one with
-// a toolbar has larger ones. Its traffic lights, its title bar's height and
-// where a sheet on it begins stay where the toolbar had them, also after a
-// new title and size and a new system appearance. The lights are in place
-// as AppKit draws that appearance, too. A first press while another app is
-// in front moves it from where it did with the toolbar. On an older macOS,
-// where a toolbar doesn't change the corners, the window keeps its toolbar.
-// A separate process runs AppKit on its main thread.
+// (TextEdit's, an Electron app's), not a toolbar's: in the design of macOS
+// 26 one with a toolbar has larger ones. Its traffic lights, its title bar's
+// height and where a sheet on it begins stay where the toolbar had them,
+// also after a new title and size and a new system appearance. The lights
+// are in place as AppKit draws that appearance, too. A first press while
+// another app is in front moves it from where it did with the toolbar. In
+// the earlier design, where a toolbar doesn't change the corners (an older
+// macOS, or a program linked against an earlier SDK than macOS 26's), the
+// window keeps its toolbar. The windows' program is run as linked against
+// each SDK, whatever the toolchain has, in a process of its own that runs
+// AppKit on its main thread.
 func TestMainWindowCorners(t *testing.T) {
+	for _, sdk := range []struct {
+		name string
+		v    uint32
+	}{{"macOS 26 SDK", sdkMacOS26}, {"macOS 15 SDK", sdkMacOS15}} {
+		t.Run(sdk.name, func(t *testing.T) { checkMainWindowCorners(t, sdk.v) })
+	}
+}
+
+func checkMainWindowCorners(t *testing.T, sdk uint32) {
 	var run titlebarRun
-	measureWindows(t, "corners", &run)
+	measureWindows(t, sdk, "corners", &run)
 	near := func(a, b float64) bool { return math.Abs(a-b) < 0.5 }
 	for _, s := range run.Stages {
 		t.Logf("%s: corners %.2fpt (plain %.2f, toolbar %.2f), lights %v (toolbar %v), title bar %.0fpt (toolbar %.0f), toolbar kept %v", s.Name,
@@ -70,10 +90,10 @@ func TestMainWindowCorners(t *testing.T) {
 		if !near(s.Main.Titlebar, s.Toolbar.Titlebar) {
 			t.Errorf("%s: a title bar %.0fpt tall, the toolbar's was %.0fpt", s.Name, s.Main.Titlebar, s.Toolbar.Titlebar)
 		}
-		// Where a toolbar doesn't change the corners (before macOS 26), the
-		// main window is left as it was
+		// Where a toolbar doesn't change the corners (the earlier design),
+		// the main window is left as it was
 		if near(s.Plain.Radius, s.Toolbar.Radius) && !s.Main.Toolbar {
-			t.Errorf("%s: a toolbar doesn't change the corners on this macOS, yet the main window's was taken off", s.Name)
+			t.Errorf("%s: a toolbar doesn't change the corners in this design, yet the main window's was taken off", s.Name)
 		}
 	}
 	if len(run.Stages) != 3 {
@@ -109,12 +129,13 @@ func TestMainWindowCorners(t *testing.T) {
 }
 
 // With its traffic lights on the right, as in a right-to-left language,
-// the main window keeps its toolbar: the lights are kept in place from the
-// left.
+// the main window keeps its toolbar, also in the design of macOS 26: the
+// lights are kept in place from the left.
 func TestMainWindowRightToLeft(t *testing.T) {
 	var s windowshape.Shape
 	// as Xcode launches an app in its right-to-left pseudolanguage
-	measureWindows(t, "right to left", &s, "-AppleTextDirection", "YES", "-NSForceRightToLeftWritingDirection", "YES")
+	measureWindows(t, sdkMacOS26, "right to left", &s,
+		"-AppleTextDirection", "YES", "-NSForceRightToLeftWritingDirection", "YES")
 	t.Logf("lights %v (x, y from the top left), toolbar kept %v", s.Lights, s.Toolbar)
 	if s.Lights[0][0] < s.Lights[2][0] {
 		t.Fatalf("launched right to left, the traffic lights are on the left: %v", s.Lights)
@@ -124,11 +145,12 @@ func TestMainWindowRightToLeft(t *testing.T) {
 	}
 }
 
-// measureWindows measures the windows in mode in a process of its own
-// (runAppKit), with args for AppKit, and decodes what it measured into v.
-func measureWindows(t *testing.T, mode string, v any, args ...string) {
+// measureWindows measures the windows in mode in a process of its own, run
+// as linked against the macOS SDK sdk (runAppKitSDK), with args for AppKit,
+// and decodes what it measured into v.
+func measureWindows(t *testing.T, sdk uint32, mode string, v any, args ...string) {
 	t.Helper()
-	out, err := runAppKit(t, 40*time.Second, []string{"MAGPIE_TEST_TITLEBAR=" + mode}, args...)
+	out, err := runAppKitSDK(t, sdk, 40*time.Second, []string{"MAGPIE_TEST_TITLEBAR=" + mode}, args...)
 	i := bytes.LastIndex(out, []byte(titlebarMark))
 	if err != nil || i < 0 {
 		t.Fatalf("measuring the windows: %v\n%s", err, out)
