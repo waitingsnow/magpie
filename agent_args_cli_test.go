@@ -377,3 +377,33 @@ func TestClaudeUltracodeNamedAsAValue(t *testing.T) {
 		t.Errorf("magpie claude ultracode on wrote:\n%s", b)
 	}
 }
+
+// magpie codex DEFAULT wrote model = "DEFAULT" into Codex's config, magpie
+// taken out with it, and magpie codex effort Default wrote
+// model_reasoning_effort = "Default". default is magpie's word in any
+// case, as help and a field's name are, and does what default does.
+func TestAgentDefaultInAnyCase(t *testing.T) {
+	path := codexOnAdvanced(t)
+	for _, c := range []struct {
+		args, want string
+		gone       *regexp.Regexp
+	}{
+		{"codex effort Default", "✓ Codex effort default\n", regexp.MustCompile(`(?m)^model_reasoning_effort =`)},
+		{"codex model DEFAULT", "✓ Codex model default\n", regexp.MustCompile(`(?m)^model =`)},
+	} {
+		out, err := printed(t, func() error { return run(strings.Fields(c.args)) })
+		b, _ := os.ReadFile(path)
+		if err != nil || out != c.want || c.gone.Match(b) {
+			t.Errorf("magpie %s: %v %q, want %q\n%s", c.args, err, out, c.want, b)
+		}
+	}
+	for _, word := range []string{"DEFAULT", "Default"} {
+		path := codexOnAdvanced(t)
+		out, err := printed(t, func() error { return run([]string{"codex", word}) })
+		b, _ := os.ReadFile(path)
+		if err != nil || out != "✓ Codex model gpt-5.5\n  disconnected from magpie, back to what it had before\n" ||
+			!strings.Contains(string(b), "model = \"gpt-5.5\"\nmodel_reasoning_effort = \"high\"\n") || strings.Contains(string(b), "model_provider = ") {
+			t.Errorf("magpie codex %s: %v %q, want Codex back on gpt-5.5\n%s", word, err, out, b)
+		}
+	}
+}

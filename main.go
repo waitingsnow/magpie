@@ -374,7 +374,9 @@ func run(args []string) error {
 	case 1:
 		return list([]*agent.Agent{a}, true, -1)
 	case 2:
-		if args[1] == "default" {
+		// default is magpie's word in any case, as help and a field's name
+		// are: magpie codex DEFAULT wrote model = "DEFAULT"
+		if strings.EqualFold(args[1], "default") {
 			if a.Wired() {
 				return disconnect(a)
 			}
@@ -393,10 +395,11 @@ func run(args []string) error {
 		}
 		return set(a, a.Fields[0].Key, args[1])
 	case 3:
-		if args[2] == "default" {
-			args[2] = ""
+		value := args[2]
+		if strings.EqualFold(value, "default") {
+			value = ""
 		}
-		return set(a, args[1], args[2])
+		return set(a, args[1], value)
 	}
 	return fmt.Errorf("too many arguments\n\n%s", usage)
 }
