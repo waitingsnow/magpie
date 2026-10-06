@@ -26,6 +26,7 @@ three.
 4. The page reads `GET /api/state` and writes through `POST` routes. Each write answers with the new state, built under `held`.
 5. Closing the window hides it. On the Mac a full-screen window first leaves full screen (`closeStep`).
 6. The window opens as it was last left. Its settled size and whether it was maximised are kept in `settings.Window` and `settings.WindowMaximised` (`settle`; per machine, see `KeepOwn`). A maximised window keeps the size it restores to. `makeMain` opens it at that size (`openSize`). On its first show, `placeMain` maximises it again on the Mac and Windows (on Windows once the page has come). On Linux, `makeMain` makes it maximised with `StartState`. On Windows a size larger than the screen's work area is fitted and centred (`fitRoom`), and the larger size stays kept. The window's position is not kept.
+7. The page's header is the window's title bar. `plainTitlebar` sets it up once the app has started, and again on a window lightweight mode made again (`madeAgain`). On Linux it hides GTK's title bar and keeps the shadow and the resize edges; GTK 3 leaves the corners square. On the Mac the traffic lights are inset into the header (`MacTitleBarHiddenInset`). From macOS 26 a window with a toolbar has larger corners than one with a plain title bar, so `insetLights` ([`titlebar_darwin.go`](../../internal/gui/titlebar_darwin.go)) takes the toolbar off, and `MagpieLights` keeps the lights and the title bar's height where the toolbar had them: after a resize, a new title, light or dark, more contrast or less transparency, and leaving full screen. A sheet, such as the folder chooser, still begins below the title bar. A first press while another app is in front still moves the window from anywhere in that title bar (`firstPress`), as AppKit moved it with the toolbar; AppKit itself now does so only in a plain title bar's top 32pt. The toolbar stays on an older macOS, with the lights on the right (a right-to-left language), or when the title bar isn't laid out as expected; this is decided once, when the window is set up. In full screen the title bar is AppKit's own. Windows keeps its own title bar.
 
 ## Constraints and failure behavior
 
@@ -74,6 +75,7 @@ axis controls.
 - There are no native `<select>` elements and no colored left-border stripes. State is shown with a dot or a swatch.
 - The Usage page's cards and the tray panel's Allowances tab share one order, `settings.UsageOrder` (`byUsageOrder`). The panel's *Arrange* (`panelArrange`) moves rows in it and hides subscriptions from that tab alone (`settings.PanelUsageHidden`); both save through `POST /api/usage/arrange`, which changes only the field it is sent, and the Settings save keeps both. Hiding is display only: a menu bar cell's card shows though hidden (`panelPeek`). See `TestUsageArrangePanelHidden` and `panel-arrange.test.cjs`.
 - The page must work in Chromium (Windows' WebView2) and WebKit (macOS, and WebKitGTK on Linux). GUI tests run in both engines.
+- On macOS 26 and later the main window has the corners of a window with a plain title bar, and its lights stay where the toolbar had them. `TestMainWindowCorners` ([`titlebar_darwin_test.go`](../../internal/gui/titlebar_darwin_test.go)) measures this in a process of its own (`runAppKit`), with package `windowshape`: after a new title and size and a new system appearance, as AppKit draws that appearance, where a first press with another app in front begins a window drag, and where a sheet begins. On an older macOS it checks that the window keeps its toolbar; `TestMainWindowRightToLeft` checks that it keeps it with the lights on the right. Both run in CI's macOS job.
 - Tests never touch a live agent config. The package's `TestMain` runs under `testenv`'s home of its own. A macOS test that shows windows runs them in a process of its own through `runAppKit` ([`appkit_darwin_test.go`](../../internal/gui/appkit_darwin_test.go)). AppKit and WebKit take their home from the account, not from HOME, so `runAppKit` gives them a temporary one with `CFFIXED_USER_HOME`; appearance, contrast and languages still come from the account. The test fails when that process leaves a folder in the real `~/Library/WebKit` or `~/Library/Caches`. Playwright tests serve `assets/` with isolated `/api` fixtures.
 - `POST /api/settings/codex-auto-review` accepts an empty value (Codex's own choice) or an exact model/group ID in `provider.Served`, including unlisted providers. A known provider with an unknown or empty model name is rejected without changing the saved reviewer or catalog tag. Generic gateway request resolution remains permissive; it is not the validator for this setting. See `Handler` in [`api.go`](../../internal/gui/api.go) and `TestCodexAutoReviewSetting` in [`codex_auto_review_test.go`](../../internal/gui/codex_auto_review_test.go).
 
@@ -91,6 +93,7 @@ waits for `show` to accept navigation before creating its draft.
 
 ```sh
 go test -tags nogui ./internal/gui
+go test -run TestMainWindow ./internal/gui
 go test -v ./internal/fonts         # native discovery on each desktop OS
 make test-ui                      # every internal/gui/tests/*.test.cjs, Chromium and WebKit
 BROWSER=webkit node --test internal/gui/tests/click-scroll.test.cjs
@@ -100,3 +103,8 @@ BROWSER=webkit node --test internal/gui/tests/click-scroll.test.cjs
 webkit`). Set `NODE_PATH` when Playwright is installed outside the repo. The
 Test workflow in CI does not run this suite, so a GUI change must run it
 locally and report the result. See [`tests/README.md`](../../internal/gui/tests/README.md).
+
+`TestMainWindowCorners` and `TestMainWindowRightToLeft` run on a Mac with a
+desktop session, as CI's macOS job has, and show a few windows for some
+seconds. Their presses are sent within the test's own process, and no system
+setting changes.

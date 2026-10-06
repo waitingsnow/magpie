@@ -479,7 +479,7 @@ func Run(version string, showMain bool, link string) error {
 		h.main.OnWindowEvent(events.Windows.WebViewNavigationCompleted, func(*application.WindowEvent) { markReady() })
 	} else {
 		h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
-			plainTitlebar(h.main) // Linux: the page's header is the title bar
+			plainTitlebar(h.main) // Linux: the page's header is the title bar; the Mac: a plain one's corners
 			nameWindow(h.panel, panelTitle)
 			markReady()
 		})
