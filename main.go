@@ -44,6 +44,7 @@ const usage = `magpie — one place to pick every agent's model
                                   --gateway: gateway mode, no Agents, Sessions or Library (on by itself with no agents here; Settings › General turns it off)
   magpie ls                       list detected agents and their settings
   magpie <agent>                  show one agent
+  magpie <agent> help             its fields, and how to set them
   magpie <agent> <model>          set an agent's model   e.g. magpie claude deepseek/deepseek-chat
   magpie <agent> <field> <value>  set another field   e.g. magpie codex effort high
   magpie <agent> default          take magpie out: the agent back on what it had before
@@ -343,6 +344,21 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	// `magpie codex --help` asks how, and a word that starts with "-" is a
+	// flag: no field takes either, and both were written into the agent's
+	// config as its model (model = "--help"), magpie taken out first. Ahead
+	// of Cindy's link too, which any word opened
+	for _, v := range args[1:] {
+		if isHelp(v) {
+			fmt.Print(agentUsage(a))
+			return nil
+		}
+	}
+	for _, v := range args[1:] {
+		if strings.HasPrefix(v, "-") {
+			return fmt.Errorf("unknown flag %s (magpie %s help)", v, a.ID)
+		}
+	}
 	if len(a.Fields) == 0 && a.Import != nil {
 		// `magpie cindy`: it takes magpie through its own link, confirmed there
 		if len(args) > 1 {
@@ -472,6 +488,65 @@ func fieldForValue(a *agent.Agent, v string) *agent.Field {
 		}
 	}
 	return nil
+}
+
+// isHelp says whether a word asks how: help, -h or --help, in any case
+// (magpie codex Help wrote model = "Help")
+func isHelp(w string) bool {
+	switch strings.ToLower(w) {
+	case "help", "-h", "--help":
+		return true
+	}
+	return false
+}
+
+// agentUsage is `magpie <agent> help`: the commands for that agent, and
+// the names its fields go by, the key and the label it is shown with
+func agentUsage(a *agent.Agent) string {
+	at := "magpie " + a.ID
+	rows := [][2]string{{at, "show " + a.Name}}
+	if len(a.Fields) == 0 {
+		// Cindy: it takes magpie through its own link, confirmed there
+		rows = append(rows, [2]string{at + " add", "open the link that adds magpie, to confirm it in " + a.Name})
+	} else {
+		first := a.Fields[0].Label
+		rows = append(rows,
+			[2]string{at + " <" + first + ">", "set its " + first},
+			[2]string{at + " <field> <value>", "set a field"},
+			[2]string{at + " default", "take magpie out: " + a.Name + " back on what it had before"},
+			[2]string{at + " <field> default", "that field back to " + a.Name + "'s own default"})
+	}
+	w := 0
+	for _, r := range rows {
+		w = max(w, lipgloss.Width(r[0]))
+	}
+	var b strings.Builder
+	b.WriteString("usage:\n")
+	for _, r := range rows {
+		fmt.Fprintf(&b, "  %s  %s\n", pad(r[0], w), r[1])
+	}
+	if len(a.Fields) == 0 {
+		return b.String()
+	}
+	b.WriteString("\n")
+	line := "  fields:"
+	for i, f := range a.Fields {
+		name := f.Key
+		if f.Label != f.Key {
+			name += " (" + f.Label + ")"
+		}
+		if i < len(a.Fields)-1 {
+			name += ","
+		}
+		// Claude Code's thirteen wrap, under the first
+		if i > 0 && lipgloss.Width(line)+1+lipgloss.Width(name) > 100 {
+			b.WriteString(line + "\n")
+			line = "         "
+		}
+		line += " " + name
+	}
+	b.WriteString(line + "\n")
+	return b.String()
 }
 
 // list prints the agents; those from dimFrom on (when not -1) are the ones
