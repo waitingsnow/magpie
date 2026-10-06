@@ -46,6 +46,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie <agent>                  show one agent
   magpie <agent> help             its fields, and how to set them
   magpie <agent> <model>          set an agent's model   e.g. magpie claude deepseek/deepseek-chat
+  magpie <agent> <field>          show one field   e.g. magpie codex effort
   magpie <agent> <field> <value>  set another field   e.g. magpie codex effort high
   magpie <agent> default          take magpie out: the agent back on what it had before
   magpie <agent> <field> default  that field back to the agent's own default
@@ -379,6 +380,12 @@ func run(args []string) error {
 			}
 			return set(a, a.Fields[0].Key, "")
 		}
+		// `magpie codex model`: a field's name alone asks what it is set to,
+		// where it was set as the model (model = "model"). Claude Code's
+		// opus is a model's name as well as a tier's, and stays the model
+		if f := a.Field(args[1]); f != nil && !modelAlias(a, args[1]) {
+			return showField(a, f)
+		}
 		// `magpie codex xhigh`: a bare value that belongs to a non-model field
 		// (effort levels, for instance) is routed there; anything else is a model.
 		if f := fieldForValue(a, args[1]); f != nil {
@@ -402,6 +409,12 @@ func set(a *agent.Agent, key, value string) error {
 			keys = append(keys, f.Key)
 		}
 		return fmt.Errorf("%s has no field %q (fields: %s)", a.Name, key, strings.Join(keys, ", "))
+	}
+	// a field's name is no value: magpie codex subagent effort ran Codex's
+	// subagents on a model called effort. Claude Code's opus is a model's
+	// name as well as a tier's
+	if g := a.Field(value); value != "" && g != nil && !modelAlias(a, value) {
+		return fieldAsValue(a, f, g, value)
 	}
 	value, err := a.Spell(f.Key, value)
 	if err != nil {
@@ -428,6 +441,41 @@ func set(a *agent.Agent, key, value string) error {
 			fmt.Println(muted.Render("  ↻ " + n))
 		}
 	}
+	return nil
+}
+
+// modelAlias says whether a word names the agent's model, in any case,
+// though a field goes by it too: Claude Code's opus, a tier's name as well
+func modelAlias(a *agent.Agent, w string) bool {
+	return slices.ContainsFunc(a.ModelAliases, func(m string) bool { return strings.EqualFold(m, w) })
+}
+
+// fieldAsValue refuses field g's name given as field f's value, for what
+// was meant: two words that are one field's label (magpie codex subagent
+// effort), a switch, which is turned on (Claude Code's ultracode), or the
+// field, which its name alone shows.
+func fieldAsValue(a *agent.Agent, f, g *agent.Field, value string) error {
+	for _, name := range []string{f.Key + " " + value, f.Key + "_" + value} {
+		if h := a.Field(name); h != nil {
+			return fmt.Errorf("%q is one field of %s's: magpie %s %s shows it", h.Label, a.Name, a.ID, h.Key)
+		}
+	}
+	if g.Options != nil {
+		if o := g.Options(a.Values()); len(o) == 1 && o[0].Value == "on" {
+			return fmt.Errorf("%q is a switch of %s's, not a value for its %s: magpie %s %s on", value, a.Name, f.Label, a.ID, g.Key)
+		}
+	}
+	return fmt.Errorf("%q is a field of %s's, not a value for its %s: magpie %s %s shows it", value, a.Name, f.Label, a.ID, g.Key)
+}
+
+// showField is `magpie <agent> <field>`: what the field is set to, as set
+// prints it
+func showField(a *agent.Agent, f *agent.Field) error {
+	v := f.Get()
+	if v == "" {
+		v = muted.Render("default")
+	}
+	fmt.Println(bold.Render(a.Name), muted.Render(f.Label), v)
 	return nil
 }
 
@@ -512,6 +560,7 @@ func agentUsage(a *agent.Agent) string {
 		first := a.Fields[0].Label
 		rows = append(rows,
 			[2]string{at + " <" + first + ">", "set its " + first},
+			[2]string{at + " <field>", "show one field"},
 			[2]string{at + " <field> <value>", "set a field"},
 			[2]string{at + " default", "take magpie out: " + a.Name + " back on what it had before"},
 			[2]string{at + " <field> default", "that field back to " + a.Name + "'s own default"})
@@ -546,6 +595,20 @@ func agentUsage(a *agent.Agent) string {
 		line += " " + name
 	}
 	b.WriteString(line + "\n")
+	// Claude Code's tiers are named as its model's aliases are
+	var both []string
+	for _, f := range a.Fields {
+		if slices.Contains(a.ModelAliases, f.Key) {
+			both = append(both, f.Key)
+		}
+	}
+	if n := len(both); n > 0 {
+		names := both[0]
+		if n > 1 {
+			names = strings.Join(both[:n-1], ", ") + " and " + both[n-1]
+		}
+		fmt.Fprintf(&b, "  %s alone name the %s: %s %s sets its %s to %s\n", names, a.Fields[0].Label, at, both[0], a.Fields[0].Label, both[0])
+	}
 	return b.String()
 }
 

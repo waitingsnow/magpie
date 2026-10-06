@@ -4,7 +4,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -213,5 +215,165 @@ func TestEveryAgentHelpWritesNothing(t *testing.T) {
 				before = homeFiles(t)
 			}
 		}
+	}
+}
+
+// magpie codex model wrote model = "model" into Codex's config, magpie
+// taken out with it, and magpie codex effort model = "effort" (reported
+// with magpie codex --help, on 0.1.1082). A field's name alone, as typed
+// or as shown, now says what the field is set to, and a field's name is
+// refused as a value: magpie codex subagent effort ran the subagents on a
+// model called effort. Neither writes a thing.
+func TestAgentFieldNameShowsIt(t *testing.T) {
+	codexOnAdvanced(t)
+	before := homeFiles(t)
+	for _, c := range []struct{ args, want string }{
+		{"codex model", "Codex model group/advanced\n"},
+		{"codex Model", "Codex model group/advanced\n"},
+		{"codex effort", "Codex effort high\n"},
+		{"codex EFFORT", "Codex effort high\n"},
+		{"codex subagents", "Codex subagents default\n"},
+		{"codex subagent_effort", "Codex subagent effort default\n"},
+		{"codex default", ""},
+	} {
+		args := strings.Fields(c.args)
+		if c.want == "" {
+			// what tells a write: taking magpie out still does
+			if _, err := printed(t, func() error { return run(args) }); err != nil || filesChanged(before, homeFiles(t)) == "" {
+				t.Fatalf("magpie %s: %v, and wrote nothing", c.args, err)
+			}
+			continue
+		}
+		out, err := printed(t, func() error { return run(args) })
+		if err != nil || out != c.want {
+			t.Errorf("magpie %s: %v %q, want %q", c.args, err, out, c.want)
+		}
+		if diff := filesChanged(before, homeFiles(t)); diff != "" {
+			t.Fatalf("magpie %s wrote:\n%s", c.args, diff)
+		}
+	}
+	codexOnAdvanced(t)
+	before = homeFiles(t)
+	for _, c := range []struct{ args, want string }{
+		{"codex subagent effort", `"subagent effort" is one field of Codex's: magpie codex subagent_effort shows it`},
+		{"codex subagents Effort", `"subagent effort" is one field of Codex's: magpie codex subagent_effort shows it`},
+		{"codex model effort", `"effort" is a field of Codex's, not a value for its model: magpie codex effort shows it`},
+		{"codex model Effort", `"Effort" is a field of Codex's, not a value for its model: magpie codex effort shows it`},
+		{"codex effort model", `"model" is a field of Codex's, not a value for its effort: magpie codex model shows it`},
+		{"codex model sign-in", `"sign-in" is a field of Codex's, not a value for its model: magpie codex login shows it`},
+	} {
+		args := strings.Fields(c.args)
+		out, err := printed(t, func() error { return run(args) })
+		if err == nil || err.Error() != c.want || out != "" {
+			t.Errorf("magpie %s: %v %q, want %s", c.args, err, out, c.want)
+		}
+		if diff := filesChanged(before, homeFiles(t)); diff != "" {
+			t.Fatalf("magpie %s wrote:\n%s", c.args, diff)
+		}
+	}
+	// a field's name in any case sets it too
+	out, err := printed(t, func() error { return run([]string{"codex", "EFFORT", "low"}) })
+	if err != nil || out != "✓ Codex effort low\n" || filesChanged(before, homeFiles(t)) == "" {
+		t.Errorf("magpie codex EFFORT low: %v %q", err, out)
+	}
+}
+
+// Every agent's fields go by their names the same way: alone, each shows
+// its field; after any field, each is refused. They were written as most
+// agents' model, and connected Claude Desktop, Cursor Private Inference,
+// Pencil, T3 Code, WorkBuddy and ZCode to magpie. Claude Code's opus,
+// sonnet, haiku and fable name its model as well as its tiers, and stay
+// the model's (TestClaudeTierNamesSetTheModel).
+func TestEveryAgentFieldNameWritesNothing(t *testing.T) {
+	cliHome(t)
+	writeHomeFile(t, filepath.Join(".claude", "settings.json"), "{\n  \"model\": \"opus\",\n  \"theme\": \"dark\"\n}\n")
+	if _, err := printed(t, func() error { return run([]string{"version"}) }); err != nil {
+		t.Fatal(err)
+	}
+	before := homeFiles(t)
+	try := func(args []string, ok func(out string, err error) bool, want string) {
+		t.Helper()
+		out, err := printed(t, func() error { return run(args) })
+		if !ok(out, err) {
+			t.Errorf("magpie %s: %v %q, want %s", strings.Join(args, " "), err, out, want)
+		}
+		if diff := filesChanged(before, homeFiles(t)); diff != "" {
+			t.Errorf("magpie %s wrote:\n%s", strings.Join(args, " "), diff)
+			before = homeFiles(t)
+		}
+	}
+	for _, a := range agent.All() {
+		var names []string
+		for _, f := range a.Fields {
+			for _, n := range []string{f.Key, f.Label} {
+				if !slices.Contains(names, n) && !slices.Contains(a.ModelAliases, n) {
+					names = append(names, n)
+				}
+			}
+		}
+		for _, n := range names {
+			f := a.Field(n)
+			try([]string{a.ID, n}, func(out string, err error) bool {
+				return err == nil && strings.HasPrefix(out, a.Name+" "+f.Label+" ") && strings.Count(out, "\n") == 1
+			}, "its "+f.Label)
+			refused := regexp.MustCompile(`^"[^"]+" is (a field|one field|a switch) of ` + regexp.QuoteMeta(a.Name) + `'s`)
+			for _, g := range a.Fields {
+				try([]string{a.ID, g.Key, n}, func(out string, err error) bool {
+					return err != nil && refused.MatchString(err.Error()) && out == ""
+				}, "it refused")
+			}
+		}
+	}
+}
+
+// Claude Code's tiers are named as its model's aliases are: magpie claude
+// opus sets its model to opus, as the docs have it, where another field's
+// name alone shows that field; magpie claude help says so.
+func TestClaudeTierNamesSetTheModel(t *testing.T) {
+	cliHome(t)
+	path := writeHomeFile(t, filepath.Join(".claude", "settings.json"), "{\n  \"model\": \"claude-opus-4-5\",\n  \"theme\": \"dark\"\n}\n")
+	for _, args := range [][]string{{"claude", "opus"}, {"claude", "sonnet"}, {"claude", "haiku"}, {"claude", "fable"}, {"claude", "model", "opus"}} {
+		want := args[len(args)-1]
+		out, err := printed(t, func() error { return run(args) })
+		if b, _ := os.ReadFile(path); err != nil || out != "✓ Claude Code model "+want+"\n" || !strings.Contains(string(b), `"model": "`+want+`"`) {
+			t.Errorf("magpie %s: %v %q\n%s", strings.Join(args, " "), err, out, b)
+		}
+	}
+	out, err := printed(t, func() error { return run([]string{"claude", "help"}) })
+	if err != nil || !strings.Contains(out, "\n  opus, sonnet, haiku and fable alone name the model: magpie claude opus sets its model to opus\n") {
+		t.Errorf("magpie claude help: %v\n%s", err, out)
+	}
+	// in another case too, where Claude Code takes its aliases as they are
+	// spelled: the tier's field isn't shown for it
+	out, err = printed(t, func() error { return run([]string{"claude", "Opus"}) })
+	if err == nil || !strings.HasPrefix(err.Error(), `"Opus" is no model of Claude Code's`) || out != "" {
+		t.Errorf("magpie claude Opus: %v %q, want it refused as a model", err, out)
+	}
+}
+
+// Claude Code's ultracode is a switch: given as its model or its effort,
+// the refusal says how to turn it on, as those fields' own errors did
+// before a field's name was refused ahead of them.
+func TestClaudeUltracodeNamedAsAValue(t *testing.T) {
+	cliHome(t)
+	path := writeHomeFile(t, filepath.Join(".claude", "settings.json"), "{\n  \"model\": \"opus\",\n  \"theme\": \"dark\"\n}\n")
+	if _, err := printed(t, func() error { return run([]string{"version"}) }); err != nil {
+		t.Fatal(err)
+	}
+	before := homeFiles(t)
+	for _, args := range [][]string{{"claude", "model", "ultracode"}, {"claude", "effort", "ultracode"}, {"claude", "effort", "Ultracode"}} {
+		out, err := printed(t, func() error { return run(args) })
+		if err == nil || !strings.HasSuffix(err.Error(), ": magpie claude ultracode on") || out != "" {
+			t.Errorf("magpie %s: %v %q, want it to say magpie claude ultracode on", strings.Join(args, " "), err, out)
+		}
+		if diff := filesChanged(before, homeFiles(t)); diff != "" {
+			t.Fatalf("magpie %s wrote:\n%s", strings.Join(args, " "), diff)
+		}
+	}
+	if _, err := printed(t, func() error { return run([]string{"claude", "ultracode", "on"}) }); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), `"ultracode": true`) {
+		t.Errorf("magpie claude ultracode on wrote:\n%s", b)
 	}
 }
