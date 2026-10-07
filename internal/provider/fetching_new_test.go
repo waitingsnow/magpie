@@ -114,6 +114,38 @@ func TestFetchingNewOnceStarted(t *testing.T) {
 		t.Fatalf("behind a FetchNew under way: took %v, fetching %v", took, busy)
 	}
 	waitFetchingNew(t)
+
+	// a second page asks while the first's fetch still picks the accounts
+	// due (held on reading them): it starts nothing, and is told lists are
+	// on their way (tsuixl on #1147)
+	if err := catalog.SaveLive("workbuddy", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	newFetches.Lock()
+	newFetches.m = map[string]time.Time{}
+	newFetches.Unlock()
+	held.Lock()
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		FetchNewBehind(5 * time.Second)
+	}()
+	for deadline := time.Now().Add(5 * time.Second); !fetchingNew.Load(); {
+		if time.Now().After(deadline) {
+			held.Unlock()
+			t.Fatal("the first FetchNewBehind didn't start")
+		}
+		runtime.Gosched()
+	}
+	FetchNewBehind(5 * time.Second)
+	busy = FetchingNew()
+	held.Unlock()
+	<-first
+	if !busy {
+		t.Fatal("a FetchNewBehind behind one still picking the accounts due is told none is on its way")
+	}
+	release <- struct{}{}
+	waitFetchingNew(t)
 }
 
 // waitFetchingNew waits for the fetches under way to end, the ones started

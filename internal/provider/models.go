@@ -320,8 +320,9 @@ var newFetches = struct {
 // restarted by hand).
 var newFetchRetry = time.Minute
 
-// fetchingNew is set while a FetchNewSoon runs; newSoonAt is when the last
-// one started.
+// fetchingNew is set while a FetchNew started in the background
+// (FetchNewSoon, FetchNewBehind) picks the accounts due or runs; newSoonAt
+// is when the last one started.
 var (
 	fetchingNew atomic.Bool
 	newSoonAt   atomic.Int64
@@ -389,8 +390,11 @@ func fetchNewGo(timeout time.Duration) {
 var newRunning atomic.Int32
 
 // FetchingNew reports whether a FetchNew is under way (start-up's, or one
-// started behind a page): accounts' lists may be on their way still.
-func FetchingNew() bool { return newRunning.Load() > 0 }
+// started behind a page): accounts' lists may be on their way still. One
+// started behind a page counts from its start, while it still picks the
+// accounts due: a page whose FetchNewBehind found it so returned at once,
+// and was told none was on its way until the one picking counted itself.
+func FetchingNew() bool { return newRunning.Load() > 0 || fetchingNew.Load() }
 
 // FetchNew asks each signed-in account whose vendor list magpie hasn't
 // fetched yet for it, each for at most timeout. Start-up does this for the
