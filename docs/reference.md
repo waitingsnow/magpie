@@ -1337,6 +1337,7 @@ magpie tui                      # the same thing, in the terminal; serves the ga
 magpie web                      # the app's window in a browser (WSL, a server over SSH); --lan, --addr, --no-open, --gateway
                                 # (a new key each run; MAGPIE_WEB_KEY keeps one, for a page run as a service)
 magpie ls                       # list every agent and its current settings
+magpie save p1 --help           # any command's usage, wherever --help, -h or help comes; nothing runs
 magpie codex help               # one agent's fields, and how to set them (--help, -h)
 magpie claude opus              # set a model (agent names accept prefixes: cc, oc, gem …)
 magpie codex gpt-5.6-sol

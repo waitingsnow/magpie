@@ -243,6 +243,14 @@ func run(args []string) error {
 		}
 		return runGUI(false, args[0])
 	}
+	// `magpie save --help` saved a profile named --help, `magpie provider
+	// key deepseek -h` made -h DeepSeek's key and `magpie rm p1 help`
+	// deleted p1: after a command's name, the help words were its values,
+	// or ignored. Wherever they come they now show the command's usage,
+	// as they do an agent's below
+	if help, ok := commandHelp(args[0]); ok && helpAsked(args) {
+		return help()
+	}
 	switch args[0] {
 	case "tui":
 		return runTUI()
@@ -549,6 +557,88 @@ func isHelp(w string) bool {
 		return true
 	}
 	return false
+}
+
+// helpAsked says whether a help word follows the command args[0] names.
+// What follows an MCP server's command in magpie library mcp add <name>
+// <command> [args…] is that server's own, -h too.
+func helpAsked(args []string) bool {
+	rest := args[1:]
+	if (args[0] == "library" || args[0] == "lib") && len(args) > 5 && args[1] == "mcp" && args[2] == "add" {
+		rest = args[1:5]
+	}
+	return slices.ContainsFunc(rest, isHelp)
+}
+
+// commandHelp is how a command of magpie's shows its usage: its own help
+// where it has one, else its lines of magpie help. Not an agent's
+// (agentUsage), nor what only magpie or a container runs
+// (claude-mcp-helper, -Embedding, healthcheck).
+func commandHelp(cmd string) (func() error, bool) {
+	lines := func(words ...string) func() error {
+		return func() error {
+			fmt.Print(usageOf(words...))
+			return nil
+		}
+	}
+	switch cmd {
+	case "group":
+		return func() error { return groupCmd([]string{cmd, "help"}) }, true
+	case "library", "lib":
+		return func() error { return libraryCmd([]string{cmd, "help"}) }, true
+	case "model":
+		return func() error { return modelCmd([]string{"help"}) }, true
+	case "plugin", "plugins":
+		return func() error { return pluginCmd([]string{cmd, "help"}) }, true
+	case "quota", "quotas":
+		return func() error { return quotaCmd([]string{cmd, "help"}) }, true
+	case "search":
+		return func() error { return searchCmd([]string{"help"}) }, true
+	case "webdav", "dav":
+		return func() error { return webdavCmd([]string{"help"}) }, true
+	case "s3":
+		return func() error { return s3Cmd([]string{"help"}) }, true
+	case "sessions":
+		return func() error {
+			fmt.Println(sessionsUsage)
+			return nil
+		}, true
+	case "save", "use", "rm", "profiles":
+		return lines("save", "use", "profiles", "rm"), true
+	case "ls", "list":
+		return lines("ls"), true
+	case "accounts", "account":
+		return lines("accounts"), true
+	case "app", "gui":
+		return lines(), true
+	case "tui", "web", "tray", "panel", "autostart", "agents", "sync", "import", "providers", "presets",
+		"provider", "models", "visible", "groups", "serve", "gateway-key", "usage", "update", "backup",
+		"restore", "mcp":
+		return lines(cmd), true
+	}
+	return nil, false
+}
+
+// usageOf is the lines of magpie help for the commands words names, a line
+// that wraps with the line it wraps from; all of it for none.
+func usageOf(words ...string) string {
+	var b strings.Builder
+	in := false
+	for _, l := range strings.Split(usage, "\n") {
+		t := strings.TrimLeft(l, " ")
+		if f := strings.Fields(t); strings.HasPrefix(t, "magpie ") && len(f) > 1 {
+			in = slices.Contains(words, f[1])
+		} else if !strings.HasPrefix(l, "      ") {
+			in = false
+		}
+		if in {
+			b.WriteString(l + "\n")
+		}
+	}
+	if b.Len() == 0 {
+		return usage
+	}
+	return b.String()
 }
 
 // agentUsage is `magpie <agent> help`: the commands for that agent, and
