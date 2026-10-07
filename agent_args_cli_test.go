@@ -18,10 +18,15 @@ import (
 // cliHome is groupsHome with every other folder an agent keeps files in
 // (XDG_DATA_HOME, XDG_STATE_HOME, Windows' APPDATA) inside its home, so
 // that homeFiles sees whatever a command writes, and with the gateway's
-// address one nothing answers at.
+// address one nothing answers at. No agent runs: what a command prints
+// doesn't gain "restart the Codex app" where Codex is open (and on Windows,
+// where anything may be).
 func cliHome(t *testing.T) {
 	t.Helper()
 	groupsHome(t)
+	was := agent.Running
+	agent.Running = func(...string) bool { return false }
+	t.Cleanup(func() { agent.Running = was })
 	home := os.Getenv("HOME")
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
@@ -31,9 +36,9 @@ func cliHome(t *testing.T) {
 	t.Setenv("MAGPIE_ADDR", "127.0.0.1:1")
 }
 
-// noBrowser puts failing stand-ins for the browser openers first on PATH:
+// browserFails puts failing stand-ins for the browser openers first on PATH:
 // Cindy's link opened in the browser for any word after magpie cindy.
-func noBrowser(t *testing.T) {
+func browserFails(t *testing.T) {
 	t.Helper()
 	bin := t.TempDir()
 	for _, name := range []string{"open", "xdg-open", "rundll32"} {
@@ -177,7 +182,7 @@ func TestAgentHelpWritesNothing(t *testing.T) {
 // api-key sets its provider).
 func TestEveryAgentHelpWritesNothing(t *testing.T) {
 	cliHome(t)
-	noBrowser(t)
+	browserFails(t)
 	writeHomeFile(t, filepath.Join(".claude", "settings.json"), "{\n  \"model\": \"opus\",\n  \"theme\": \"dark\"\n}\n")
 	if _, err := printed(t, func() error { return run([]string{"version"}) }); err != nil {
 		t.Fatal(err)
