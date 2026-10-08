@@ -214,3 +214,5 @@ func plainTitlebar(w *application.WebviewWindow) {
 }
 
 func nameWindow(*application.WebviewWindow, string) {}
+
+func ownFrame(*application.WebviewWindow) {}
