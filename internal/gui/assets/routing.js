@@ -70,7 +70,9 @@
   const log = el("div", "rt-log");
   const logHead = el("div", "rt-log-head");
   const steps = el("ol", "rt-steps");
-  log.append(logHead, steps);
+  // what the request's prompt held: its context window (context.js)
+  const ctxBox = el("div", "rt-ctx");
+  log.append(logHead, steps, ctxBox);
   const off = el("div", "none rt-off");
   // over the stage while a replay plays: the time it is replaying, which
   // requests are in flight then, and where it is among them
@@ -185,10 +187,10 @@
       steady(renderHist);
     }, "Metrics to show", "rt-metric-menu", "right", true);
   };
-  let purpose = "";
+  let purpose = [];
   purposeClear.onclick = () => {
     closeProtoMenu();
-    purpose = "";
+    purpose = [];
     steady(followListed);
     purposePick.focus({ preventScroll: true });
   };
@@ -197,6 +199,23 @@
   colB.append(actHead, acts);
   hist.append(colA, colB);
   more.append(hist);
+  // the narrow and wide layouts go by a box's own width, as container
+  // queries would, set here as a class (max560: 560px wide or less). Not
+  // by container queries: with query containers in it, WebKit pulled the
+  // scrolling view back from its end a frame after each scroll there, so
+  // the page couldn't be scrolled to its bottom (#1249). Set on the next
+  // frame: a class changed in the observer's own call changes the box's
+  // height, which WebKit reports as a ResizeObserver loop (see quotaFit)
+  const byWidth = (node, marks) => new ResizeObserver(([e]) => {
+    const w = e.contentRect.width;
+    requestAnimationFrame(() => {
+      for (const [cls, fits] of Object.entries(marks)) node.classList.toggle(cls, fits(w));
+    });
+  }).observe(node);
+  byWidth(box, { max560: (w) => w <= 560 });
+  byWidth(list, { max460: (w) => w <= 460, max560: (w) => w <= 560 });
+  byWidth(more, { max520: (w) => w <= 520, min1150: (w) => w >= 1150 });
+  for (const col of [colA, colB]) byWidth(col, { max440: (w) => w <= 440, max760: (w) => w <= 760 });
 
   const path = () => { const p = document.createElementNS(NS, "path"); wires.appendChild(p); return p; };
   const setText = (e, s) => { if (e.textContent !== s) e.textContent = s; };
@@ -335,6 +354,10 @@
     usage: ["Least used", "Least used first: the account with the most of its allowance left goes first; a key by the tokens magpie sent it lately."],
     pace: ["Weekly pace", "Weekly pace: the account with the most of its week left per hour until it renews goes first — the one with the most to lose at its reset; an account with five hours and no week by what its five hours have left per hour. One at 90% or more waits until the others can't answer; a key by the tokens magpie sent it lately."],
     manual: ["Manual", "Manual: every request goes to the model picked on the group's card, over its own accounts or keys."],
+    // the provider's key routing (#841); both strings as the provider
+    // editor's routing options say them (app.js ROUTINGS), so every
+    // language is already spoken
+    weight: ["By weight", "Requests spread over the keys by the weight set beside each: a key weighing 3 takes three requests for every one a key weighing 1 takes, evenly over a few requests. One that fails is passed over while it rests, and the others share its requests; a conversation stays with its key as Stays says."],
   };
   const GROUP_ORDER = "In order: member by member, the first model the group names until it can't answer, each over its own accounts or keys as its provider routes them.";
   const KEYS_SMART = "Smart: keys that suit the request go first — one made for the model's own API — then in their order. One resting after a failure goes last.";
@@ -1273,6 +1296,37 @@
       }
     }
     renderSteps(r);
+    renderCtx(r);
+  }
+  // renderCtx draws the request's context window under its story, with
+  // its session's prompts request by request; drawn again only when what
+  // it shows changes, and its cells come in only for a request newly shown
+  let ctxKey = "", ctxShown = 0, ctxTab = "all";
+  function renderCtx(r) {
+    if (!r.prompt || !window.ctxCard) {
+      if (ctxKey) { ctxKey = ""; ctxBox.replaceChildren(); }
+      return;
+    }
+    const sk = sessionKey(r);
+    const same = (x) => x.prompt && x.agent === r.agent && !x.kind && (sk ? sessionKey(x) === sk : r.conv && x.conv === r.conv);
+    const series = (sk || r.conv) && !r.kind ? listed().filter(same).sort((a, b) => a.id - b.id)
+      .map((x) => ({ id: x.id, tokens: x.prompt.tokens, time: x.time })) : null;
+    if (series && !series.some((x) => x.id === r.id)) series.push({ id: r.id, tokens: r.prompt.tokens, time: r.time });
+    const key = JSON.stringify([document.documentElement.lang, r.id, r.done, r.prompt.tokens, r.prompt.counted, r.prompt.window, r.usage?.length, series?.map((x) => x.id + ":" + x.tokens).join()]);
+    if (key === ctxKey) return;
+    ctxKey = key;
+    const still = ctxShown === r.id;
+    ctxShown = r.id;
+    const sess = groupSession(r) || r.conv || "";
+    ctxBox.replaceChildren(window.ctxCard(r, {
+      still, series, tab: ctxTab, place: "routing",
+      onTab: (id) => { ctxTab = id; },
+      crumbs: [agentName(r.agent), sess && (sess.length > 14 ? sess.slice(0, 12) + "…" : sess), "#" + r.id],
+      onPoint: (pt) => {
+        const x = routes.get(pt.id) || listed().find((y) => y.id === pt.id);
+        if (x) pick(x);
+      },
+    }));
   }
   // logoed puts the provider's logo before the first account, key or
   // provider a line of the story names, so who it is about reads at a
@@ -1376,7 +1430,7 @@
       await loadDays(day);
       if (!past.some((x) => x.id === id)) past.push(r);
     }
-    if (purpose && purposeOf(r.kind) !== purpose) purpose = "";
+    if (!matchesPurpose(r)) purpose = [];
     offline("");
     window.show("routing");
     pick(r);
@@ -1481,13 +1535,13 @@
   // listed: the requests the list shows, newest first — the gateway's last
   // few, or a day the history keeps
   const allListed = () => (day ? past : [...routes.values()]).slice().sort((a, b) => b.id - a.id);
-  const matchesPurpose = (r) => !purpose || purposeOf(r.kind) === purpose;
+  const matchesPurpose = (r) => !purpose.length || purpose.includes(purposeOf(r.kind));
   const listed = () => allListed().filter(matchesPurpose);
   // Match the rows and story: a broken-off 200 fails, an informational note
   // on an answered request (such as Codex titles being off) does not.
   const failedRoute = (r) => r.done && outcome(r)[1] === "bad";
   function renderStats(rs) {
-    const scoped = !!(day || purpose), done = rs.filter((r) => r.done);
+    const scoped = !!(day || purpose.length), done = rs.filter((r) => r.done);
     const counts = scoped ? {
       requests: done.length,
       rerouted: done.reduce((n, r) => n + r.tries.filter((tr, i) => tr.rest && i < r.tries.length - 1).length, 0),
@@ -1690,31 +1744,31 @@
     const rs = listed();
     renderStats(rs);
     const all = allListed();
-    hist.hidden = !all.length && !day && !days.length && !purpose;
-    const opts = purposeOptions(all.map((r) => purposeOf(r.kind)), purpose);
-    const selected = opts.find((o) => o.v === purpose);
-    purposeTools.hidden = opts.length < 2 && !purpose;
-    purposeTools.classList.toggle("set", !!purpose);
-    purposeClear.hidden = !purpose;
+    hist.hidden = !all.length && !day && !days.length && !purpose.length;
+    const opts = purposeOptions([...all.map((r) => purposeOf(r.kind)), ...purpose]);
+    const selected = opts.filter((o) => purpose.includes(o.v));
+    purposeTools.hidden = opts.length < 2 && !purpose.length;
+    purposeTools.classList.toggle("set", !!purpose.length);
+    purposeClear.hidden = !purpose.length;
     purposeClear.title = t("Clear filter");
     purposeClear.setAttribute("aria-label", t("Clear filter"));
-    const label = purpose ? t("Purpose: {name}", { name: selected?.name || purpose }) : t("Purpose filter");
+    const label = purpose.length ? t("Purpose: {name}", { name: selected.map((o) => o.name).join(", ") }) : t("Purpose filter");
     setText(purposeLabel, label);
     purposePick.setAttribute("aria-label", label);
-    purposePick.title = t("Filter routing by purpose") + (purpose ? "\n" + label : "");
+    purposePick.title = t("Filter routing by purpose") + (purpose.length ? "\n" + label : "");
     setText(metricLabel, t("Metrics"));
     metricPick.title = t("Metrics to show");
     purposePick.onclick = (e) => {
       e.stopPropagation();
       if (purposePick.classList.contains("open")) return closeProtoMenu();
-      // A handful of purposes needs a small menu; explanations stay in tooltips.
+      // Tick several purposes without closing the menu; an empty list shows all.
       openProtoMenu(purposePick, [{ v: "", name: t("All purposes"), note: "" }, ...opts].map((o) => ({
         ...o, literalName: true, title: o.note || o.v, note: "",
-      })), purpose, (v) => {
-        purpose = v;
+      })), purpose, (keys) => {
+        purpose = keys;
         steady(followListed);
-        purposePick.focus({ preventScroll: true });
-      }, "Purpose", "rt-purpose-menu", "right");
+        if (!purpose.length) purposePick.focus({ preventScroll: true });
+      }, "Purpose", "rt-purpose-menu", "right", true);
     };
     setText(reqLabel, t("Requests"));
     setText(replayAll, t("Replay them all"));
@@ -1738,7 +1792,7 @@
     hist.classList.toggle("solo", none);
     if (none) {
       const p = el("div", "empty-state");
-      p.append(el("b", "", purpose ? t("No requests match these filters.") : day ? t("Nothing on {day}", { day: dayName(day) }) : t("No requests since magpie started")),
+      p.append(el("b", "", purpose.length ? t("No requests match these filters.") : day ? t("Nothing on {day}", { day: dayName(day) }) : t("No requests since magpie started")),
         t("Each request an agent sends through magpie shows up here: who answered it, why, and each try."));
       if (!day && days.length) p.append(" " + t("Earlier ones are kept by day, in the bar above."));
       reqs.replaceChildren(p);
@@ -2376,7 +2430,7 @@
 
   function empty() {
     offline("");
-    what.replaceChildren(el("b", "", t(purpose || day ? "No requests match these filters." : "Waiting for a request")));
+    what.replaceChildren(el("b", "", t(purpose.length || day ? "No requests match these filters." : "Waiting for a request")));
     mode.textContent = t("Send one from any agent routed through magpie and it plays here as it happens: who routing put first and why, each try, and what each answered.");
     for (const a of agents.values()) a.wire.remove();
     agents.clear();
@@ -2391,7 +2445,7 @@
     subs.clear();
     chip.hidden = true;
     hubText();
-    list.replaceChildren(el("li", "idle", t(purpose || day ? "No requests match these filters." : "No request yet")));
+    list.replaceChildren(el("li", "idle", t(purpose.length || day ? "No requests match these filters." : "No request yet")));
     say(t("Every request an agent sends to magpie shows up here, routed for real."));
     log.hidden = true;
     renderHist(); // none live, but the days the history keeps are still there to look at
@@ -2651,8 +2705,8 @@
   // Discord: they could only be removed one at a time); null otherwise
   let gSel = null;
   // gQ: the groups filtered by name and by the models in them, as many
-  // as there may be (PAMI on Discord); kept across redraws, and focused
-  // again when one comes while typing
+  // as there may be (PAMI on Discord); kept across redraws, never taken
+  // out of the page while it is there
   const gQ = el("input", "sess-filter rt-gfilter");
   gQ.type = "search";
   gQ.spellcheck = false;
@@ -2677,7 +2731,6 @@
     newBtn.append(svg(PLUS, 11, 1.8), el("span", "", t("New group")));
     newBtn.onclick = () => newGroup();
     const head = [el("span", "label", t("Routing groups")), el("span", "grow"), el("span", "note", t("models agents pick as one"))];
-    const typing = document.activeElement === gQ, [a, b] = [gQ.selectionStart, gQ.selectionEnd];
     if (all.length > 1 || gQ.value) {
       gQ.placeholder = t("Filter groups and models");
       gQ.setAttribute("aria-label", gQ.placeholder);
@@ -2696,8 +2749,9 @@
       }
       head.push(newBtn);
     }
-    gHead.replaceChildren(...head);
-    if (typing && gQ.isConnected) { gQ.focus({ preventScroll: true }); try { gQ.setSelectionRange(a, b); } catch {} }
+    // the filter stays in the page as the rest of the row is drawn again,
+    // so the key being typed into it lands once (#1055)
+    replaceKeeping(gHead, head);
     drawFound();
     drawNames();
     const rows = [];
@@ -3407,11 +3461,21 @@
     const rlist = el("div", "fbl");
     const rAdd = el("button", "rt-gadd");
     rAdd.append(svg(PLUS, 11, 1.8), el("span", "", t("Add a rule")));
+    // a rule by what the message asks for, offered beside it: told only as
+    // one of a rule's conditions, an intent went unseen (CherryL1quor on X
+    // took Jev for effort alone)
+    const rIntent = el("button", "rt-gadd");
+    rIntent.append(svg(PLUS, 11, 1.8), el("span", "", t("Route by what it asks for")));
+    const rAdds = el("div", "rt-gadds");
+    rAdds.append(rAdd, rIntent);
+    // the rule just added by intent, its intent not yet typed: the
+    // classifier shows for it all the same, so it is seen to be needed
+    let asking = null;
     const rHint2 = el("div", "hint");
     const drawRules = () => {
       drawCtx(); // the members' windows changed with them
       rlist.replaceChildren();
-      rAdd.hidden = d.members.length < 2;
+      rAdd.hidden = rIntent.hidden = d.members.length < 2;
       rHint2.textContent = t(d.members.length < 2 ? "With two models or more, a rule can send some turns to one of them first."
         : d.routing === "manual" ? "The rules wait while you pick the model by hand."
         : "Checked top first when you send a message: the first that matches sends that turn to its model first; the rest stay behind it if it fails. A turn under way is never moved.");
@@ -3454,7 +3518,13 @@
         it.onclick = () => ii.focus();
         const ii = input(r.intent || "", t("what it asks for, e.g. writing tests"));
         ii.maxLength = 200;
-        ii.oninput = () => { r.intent = ii.value; it.classList.toggle("on", !!r.intent.trim()); drawClassifier(); };
+        ii.oninput = () => {
+          r.intent = ii.value; it.classList.toggle("on", !!r.intent.trim());
+          // Jev, when there is one, as the effort picked per turn takes it
+          if (r.intent.trim() && !d.classifier && deciders.length) d.classifier = deciders[0].id;
+          drawClassifier();
+        };
+        if (r === asking) focusIntent = ii;
         ii.onkeydown = (e) => e.stopPropagation();
         it.append(el("span", "", t("asks for")), ii);
         // compacting: the agent summarizing its conversation (/compact),
@@ -3532,8 +3602,19 @@
         rlist.append(row);
       });
       drawClassifier();
+      focusIntent?.focus({ preventScroll: true });
+      focusIntent = null;
     };
-    rAdd.onclick = () => { d.rules.push({ use: d.members[d.members.length - 1], tokens: 0, images: false, effort: "", agents: [], intent: "", compact: false, time: null }); drawRules(); };
+    let focusIntent = null;
+    const newRule = () => ({ use: d.members[d.members.length - 1], tokens: 0, images: false, effort: "", agents: [], intent: "", compact: false, time: null });
+    rAdd.onclick = () => { d.rules.push(newRule()); drawRules(); };
+    const addIntentRule = () => {
+      asking = newRule();
+      d.rules.push(asking);
+      if (!d.classifier && deciders.length) d.classifier = deciders[0].id;
+      drawRules();
+    };
+    rIntent.onclick = addIntentRule;
     // the classifier, once a rule has an intent or the effort is picked
     // per turn: the model asked which intent a turn's message is and how
     // hard it is. Jev (a decision provider's model) answers both in one
@@ -3549,10 +3630,10 @@
     const isJev = (id) => deciders.some((x) => x.id === id);
     const drawClassifier = () => {
       const auto = d.effort === "auto";
-      const on = auto || d.rules.some((r) => r.intent?.trim());
+      const intents = d.rules.some((r) => r.intent?.trim() || (r === asking && d.rules.includes(r)));
+      const on = auto || intents;
       cls.hidden = cw.hidden = clabel.hidden = !on;
       if (!on) return;
-      const intents = d.rules.some((r) => r.intent?.trim());
       clabel.textContent = t(auto && !intents ? "Decided by" : "Intent told by");
       // a model, or another group: its models are asked in turn, failing
       // over as any request to it does (never this group: it would ask
@@ -3578,8 +3659,14 @@
           : auto
           ? "As a turn begins, this model is asked which of the intents the message is and how hard the turn is, each once; a small, fast one without reasoning is best. If it can't say, no intent matches and the turn reasons as the agent asked. Its calls show in the usage as magpie’s own."
           : "As a turn begins, this model is asked which of the intents the message is — once; a small, fast one without reasoning is best. If it fails or can't say, no intent matches. Its calls show in the usage as magpie’s own.")));
+      // picking the effort alone, the classifier can pick the model too
+      if (!intents && d.members.length > 1) {
+        const more = el("button", "text rt-cls-more", t("It can pick the model too: add a rule with an intent"));
+        more.onclick = addIntentRule;
+        cls.append(more);
+      }
     };
-    rbox.append(rlist, rAdd);
+    rbox.append(rlist, rAdds);
     const rw2 = el("div");
     rw2.append(rbox, rHint2);
     ed.append(el("label", "", t("Rules")), rw2);

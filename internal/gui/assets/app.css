@@ -782,6 +782,8 @@ body.window .field.solo { grid-column: auto; }
    were of — by provider, agent or model — which is also the chart's legend */
 .led-dash { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 .led-dash[hidden] { display: none; }
+/* the totals and the two sources: one block of cells, a line between them, as
+   the totals above have it */
 .led-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
 .led-strip .blk { min-width: 0; padding: 11px 15px 10px; }
 .led-strip .blk + .blk { border-left: 1px solid var(--line-2); }
@@ -868,6 +870,21 @@ body.window .field.solo { grid-column: auto; }
 /* over the requests: their sum, and at its right the request archive's switch */
 .led-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin: 0 2px 7px; min-width: 0; }
 .led-head .led-sum { margin: 0; min-width: 0; }
+/* the two sources the request page counts and their total, in the same block
+   of cells as the totals above them, each one clickable to filter by it */
+.led-vias { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0 0 9px; }
+.led-vias[hidden] { display: none; }
+.led-vias .blk { cursor: pointer; text-align: left; border: 0; font: inherit; color: inherit; background: none; }
+.led-vias .blk:hover { background: var(--pill-hover); }
+.led-vias .blk:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* the one being filtered by: its own colour under the count, no blue text */
+.led-vias .blk.on { box-shadow: inset 0 -2px 0 var(--accent); }
+/* the count's unit sits after the number, small, as its label is under it */
+.led-vias .v em { margin-left: 3px; font-size: 12.5px; font-weight: 600; font-style: normal; color: var(--muted); }
+@media (max-width: 620px) {
+  .led-vias { grid-template-columns: minmax(0, 1fr); }
+  .led-vias .blk + .blk { border-left: 0; border-top: 1px solid var(--line-2); }
+}
 .led-arch { display: inline-flex; align-items: center; gap: 8px; flex: none; margin-left: auto; }
 .led-arch-sw { display: inline-flex; align-items: center; gap: 7px; padding: 2px 0; background: none; border: 0; font: inherit; font-size: 11.5px; color: var(--muted); cursor: pointer; }
 .led-arch-sw:hover, .led-arch-sw.on { color: var(--fg); }
@@ -917,7 +934,10 @@ body.window .field.solo { grid-column: auto; }
 .led.tight .model, .led.tight .where { max-width: 160px; }
 .led.tight th, .led.tight td { padding-left: 6px; padding-right: 6px; }
 .led.tighter .price-reference { display: none; }
-.led.tighter .model, .led.tighter .where { max-width: 110px; }
+/* the account's name is cut at 110px, but its column keeps room for the
+   source badges under it, which don't wrap: capped at 110px the cell cut
+   off the second English one ("Subscription") */
+.led.tighter .model, .led.tighter .where-name { max-width: 110px; }
 .led.tighter th, .led.tighter td { padding-left: 4px; padding-right: 4px; }
 .led.tighter th { white-space: normal; }
 .led-tight { font-size: 11.5px; color: var(--muted); }
@@ -1795,7 +1815,9 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .jt-fold { display: inline-block; width: 0; height: 1em; overflow: visible; white-space: nowrap; vertical-align: -.15em; }
 .jt-fold svg { display: inline-block; margin-left: -12px; color: var(--faint); transition: transform .12s; }
 .jt-fold.open svg { transform: rotate(90deg); }
-.jt-fold:hover svg, .jt-fold:focus-visible svg { color: var(--fg); }
+.jt-fold:hover svg { color: var(--fg); }
+/* :focus-visible in a rule of its own: in a list, Safari before 15.4 drops the whole rule */
+.jt-fold:focus-visible svg { color: var(--fg); }
 .jt-key { color: var(--tk-f); cursor: copy; }
 .jt-key:hover { text-decoration: underline dotted; text-underline-offset: 2px; }
 .jt-copy { display: inline-block; width: 0; height: 1em; overflow: visible; white-space: nowrap; vertical-align: -.2em; opacity: 0; }
@@ -1804,7 +1826,8 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .jt-copy.done svg { color: var(--green); }
 /* faded, not hidden, so the pointer on its way across the gap to it still
    finds it there */
-.jt-head:hover > .jt-copy, .jt-copy:focus-visible, .jt-copy.done { opacity: 1; }
+.jt-head:hover > .jt-copy, .jt-copy.done { opacity: 1; }
+.jt-copy:focus-visible { opacity: 1; }
 .jt-kids[hidden], .jt-sum[hidden] { display: none; }
 .jt-sum { color: var(--muted); border-radius: 3px; }
 .jt-sum:hover { background: var(--pill-hover); color: var(--fg); }
@@ -1841,7 +1864,7 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .provider .name .badge { margin-left: 6px; }
 /* a row whose name holds a vendor's outage badge (#971): the name gives
    way to it, the badge is never the part cut */
-.provider .name:has(> .badge.upstream) { display: flex; align-items: center; }
+.provider .name.with-upstream { display: flex; align-items: center; }
 .provider .name > .nm { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .badge { font-size: 9.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; padding: 1px 5px; border-radius: 4px; background: var(--amber-soft); color: var(--amber); vertical-align: 1px; }
 .provider.selected { background: var(--card-2); }
@@ -2582,6 +2605,12 @@ input.words.search-key, input.words.search-url { flex: 1 1 120px; width: auto; m
 /* a usage alert's share or amount: a short number field, its unit beside it */
 .warm-at input.at.num { width: 64px; text-align: right; }
 .warm-at .unit { color: var(--muted); font-size: 12.5px; margin-left: -4px; }
+/* a daily warm-up's times (#1260): each with its ×, then +, wrapping under one another on a narrow window rather than past it */
+.warm-at.times { flex: 0 0 auto; max-width: 65%; align-items: flex-start; }
+.warm-at.times > :not(.warm-times) { flex: none; }
+.warm-at .warm-times { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px 8px; min-width: 0; }
+.warm-at .warm-time { display: inline-flex; align-items: center; gap: 2px; }
+.warm-at .warm-rm, .warm-at .warm-add { min-width: 24px; height: 27px; padding: 0 6px; font-size: 14px; line-height: 1; }
 .row.pref .sub .warn { color: var(--amber); }
 .row.pref .sub.wraps { white-space: normal; }
 /* the field's clock and picker in the page's own palette */
@@ -2772,6 +2801,7 @@ body.panel .modal { padding: 16px 12px; }
   body.web .row.pref > .who { flex-basis: 100%; }
   body.web .row.pref .sub { white-space: normal; }
   body.web .row.pref .segs { margin-left: 0; max-width: 100%; flex-wrap: wrap; }
+  body.web .row.pref .warm-at.times { max-width: 100%; }
   body.web .proxy-segs { margin-left: 0; flex-wrap: wrap; justify-content: flex-start; }
   body.web .usage-head { height: auto; min-height: 44px; flex-wrap: wrap; gap: 8px; }
   body.web .usage-head > .segs { max-width: 100%; flex-wrap: wrap; }
@@ -3164,6 +3194,12 @@ body.window .row + .row.agent.conn > .who { min-height: 41px; } /* the line abov
 :where(html[data-fonts]) .ag-code, :where(html[data-fonts]) .ag-diff code, :where(html[data-fonts]) .ag-path { font-style: var(--code-style, inherit); font-weight: var(--code-weight, inherit); font-stretch: var(--code-stretch, 100%); }
 .ag-code { padding: 1px 5px; border-radius: 4px; background: var(--pill); color: var(--fg); }
 .ag-warn { gap: 8px; font-size: 12px; }
+/* a note of several lines: its dot stays by the first line, the words wrap beside it */
+.ag-vl.ag-menu-cap { flex-wrap: nowrap; align-items: flex-start; line-height: 1.6; }
+.ag-menu-cap > .ag-dot { margin-top: calc(0.8em - 3px); }
+.ag-menu-cap > span:last-child { flex: 1; min-width: 0; }
+/* which copy is left on the old list: a sentence that wraps as one, under the warning's words */
+.ag-vl.ag-stale-copy { display: block; padding-left: 14px; font-size: 12px; line-height: 1.6; color: var(--fg-2); }
 .ag-hint { font-size: 12px; color: var(--muted); }
 .ag-tier { width: 70px; flex: none; font-size: 12px; color: var(--fg-2); }
 .ag-vl .field.ag-pick { width: 220px; justify-content: flex-start; }
@@ -3214,7 +3250,7 @@ body.window .row + .row.agent.conn > .who { min-height: 41px; } /* the line abov
   .ag-vl > .fields > .field.main, .ag-vl > .fields > .field.solo { flex: 1 1 100%; min-width: 0; }
   .ag-vl > .fields > .field.side { flex: 1 0 124px; }
   .ag-vl > .fields > .extras-cell { flex-wrap: wrap; max-width: 100%; }
-  .ag-vl .field.ag-pick { flex: 1 1 160px; width: auto; min-width: 0; }
+  .ag-vl .field.ag-pick { flex: 0 0 220px; width: 220px; min-width: 0; }
   /* short of room, the model it starts on takes a line of its own under
      the name, the link and the switch staying beside it */
   .row.agent.conn > .field.ag-start, .row.agent.conn > .who + .field.ag-start { order: 1; flex: 1 1 100%; width: auto; margin: 9px 0 0 34px; }

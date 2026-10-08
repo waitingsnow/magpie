@@ -67,6 +67,8 @@ type providerJSON struct {
 	Website   string            `json:"website"`
 	KeysURL   string            `json:"keysUrl"`
 	Headers   map[string]string `json:"headers,omitempty"`
+	// the API the user gave a custom provider's Base URL as (BaseAPI)
+	BaseAPI string `json:"baseAPI,omitempty"`
 	// the vendor searches the web by itself (provider.Searches)
 	Searches bool `json:"searches"`
 	// on the Cline API: its DeepSeek models are served by DeepSeek's own
@@ -403,7 +405,7 @@ func agentUses(agents []*agent.Agent, findGroup func(string) (provider.Group, []
 func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	out := providerJSON{
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
-		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Decide: p.Decide, ModelTest: p.ModelTest(), DecideTest: p.AsksDecideModels(),
+		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), DecideTest: p.AsksDecideModels(),
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, Headers: p.Headers, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, ModelsURL: p.ModelsURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
@@ -704,6 +706,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 	importAppsRoutes(mux)
 	pluginRoutes(mux, w)
 	traceRoutes(mux)
+	contextRoutesAPI(mux)
 	groupRoutes(mux)
 	// how each key's or account's requests stand under its limit on
 	// requests at once (#892), read every two seconds while a provider's
@@ -1119,6 +1122,23 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 					if in.Key == old.Key {
 						in.KeyName, in.KeyProtocol, in.KeyWeight = old.KeyName, old.KeyProtocol, old.KeyWeight
 					}
+					// what the editor doesn't show, set from the CLI or the
+					// TUI, is kept: its tag, website and key page, and on a
+					// preset's provider its Balance and Models URLs too,
+					// which only a custom one's editor has fields for
+					in.Family = cmp.Or(in.Family, old.Family)
+					in.Website = cmp.Or(in.Website, old.Website)
+					in.KeysURL = cmp.Or(in.KeysURL, old.KeysURL)
+					if provider.Preset(in.Preset) != nil {
+						in.BalanceURL = cmp.Or(in.BalanceURL, old.BalanceURL)
+						in.BalancePath = cmp.Or(in.BalancePath, old.BalancePath)
+						in.ModelsURL = cmp.Or(in.ModelsURL, old.ModelsURL)
+					}
+				}
+				// the Base URL's API, as picked in the editor; a save that
+				// doesn't say keeps it
+				if in.BaseAPI == "" && old != nil {
+					in.BaseAPI = old.BaseAPI
 				}
 				if in.Icon == "" && old != nil && in.Preset == "" {
 					in.Icon = old.Icon
