@@ -67,6 +67,16 @@ func (p place) getenv(k string) string {
 	return appdir.Getenv(k)
 }
 
+// codexHome is Codex's folder at the place: $CODEX_HOME on this machine
+// (appdir.CodexHome), ~/.codex in a distro, whose variables magpie can't
+// read.
+func (p place) codexHome() string {
+	if p.spell != nil {
+		return filepath.Join(p.home, ".codex")
+	}
+	return appdir.CodexHomeIn(p.home)
+}
+
 // exists is whether there is a file or folder at path, as an agent looks
 // for the one it reads; false at a cold place.
 func (p place) exists(path string) bool {
@@ -140,6 +150,10 @@ type distro struct {
 	// Versions is what the CLIs of wslKinds that ask (version) said their
 	// versions are at the last probe, by the kind's id
 	Versions map[string]string `json:"versions,omitempty"`
+	// OmpProfiles are the named omp profiles the probe found under
+	// ~/.omp/profiles there: each is an agent of its own (omp#<name>).
+	// Kept so a stopped distro lists them without being started.
+	OmpProfiles []string `json:"ompProfiles,omitempty"`
 	// Mirrored is whether the distro's 127.0.0.1 is Windows' (mirror): in
 	// mirrored networking, or in consomme
 	Mirrored bool `json:"-"`
@@ -211,6 +225,12 @@ func (d distro) base() string {
 
 func (d distro) place(id string) place {
 	kind, _, _ := strings.Cut(id, "@")
+	// a profile's row is omp#<name>@wsl:<distro>, whose kind is
+	// omp#<name>: the probe keeps the binary version under omp, so the
+	// lookup cuts the profile off
+	if k, _, ok := strings.Cut(kind, "#"); ok {
+		kind = k
+	}
 	return place{home: d.local(d.Home), id: id, spell: d.native, sys: d.local, base: d.base, cold: !d.Running, version: d.Versions[kind]}
 }
 
@@ -236,7 +256,7 @@ type wslKind struct {
 
 var wslKinds = []wslKind{
 	{id: "codex", name: "Codex", dir: ".codex", bin: "codex", in: codexIn,
-		restart: "builds its model list at start-up — restart it (and the Codex app's WSL connection) to see this.",
+		restart: "builds its model list at start-up — restart it, the app-server its sessions share (" + provider.CodexDaemonRestart + " there) and the Codex app's WSL connection to see this.",
 		asleep: func(key string) func(map[string]string) []Option {
 			switch key {
 			case "model", "subagent":
@@ -245,10 +265,7 @@ var wslKinds = []wslKind{
 				}
 			case "effort":
 				return func(cur map[string]string) []Option {
-					if e := catalog.Efforts(append(catalog.Codex(), magpieModels("codex")...), cur["model"]); len(e) > 0 {
-						return static(e...)
-					}
-					return static("low", "medium", "high", "xhigh")
+					return codexEfforts(append(catalog.Codex(), magpieModels("codex")...), cur["model"])
 				}
 			}
 			return nil
@@ -323,6 +340,18 @@ var wslKinds = []wslKind{
 			}
 			return func(cur map[string]string) []Option {
 				return append(kimiOwnOptions("", cur["model"]), viaMagpie("kimi", magpieID+"/")...)
+			}
+		}},
+	// Qwen Code's ~/.qwen, one settings.json of the same shape as this
+	// machine's; a stopped distro's is looked at once it is started
+	{id: "qwen", name: "Qwen Code", dir: ".qwen", bin: "qwen", in: qwenIn,
+		restart: "reads a session's model at start-up — start a new session, or /model anew, to use this.",
+		asleep: func(key string) func(map[string]string) []Option {
+			if key != "model" {
+				return nil
+			}
+			return func(cur map[string]string) []Option {
+				return append(qwenOwnOptions("", cur["model"]), viaMagpie("qwen", magpieID+"/")...)
 			}
 		}},
 	{id: "omp", name: "omp", dir: ".omp", bin: "omp", in: ompIn, version: true,
@@ -421,6 +450,11 @@ var wslKinds = []wslKind{
 				return append(atomcodeOwnModels("", cur["model"]), viaMagpie("atomcode", magpieID+"/")...)
 			}
 		}},
+	// Snow CLI's ~/.snow, its profiles the distro's own; a stopped
+	// distro's are looked at once it is started
+	{id: "snow", name: "Snow CLI", dir: ".snow", bin: "snow", in: snowIn,
+		restart: "reads its profile at start-up — restart open snow sessions to use this.",
+		asleep:  wslOwnAsleep("snow", "model")},
 	// no dir: Antigravity keeps its folders in ~/.gemini too, so only the
 	// command says Gemini CLI is there
 	{id: "gemini", name: "Gemini CLI", bin: "gemini", in: geminiIn,
@@ -532,6 +566,9 @@ func wslFound(d distro) bool {
 // its row are the ones it is shown only when kept under that id too (#927).
 func (a *Agent) ListsFor() string {
 	id, _, _ := strings.Cut(a.ID, "@wsl:")
+	// a named omp profile (omp#work) shares omp's lists: it is another
+	// omp, not another agent with a catalog of its own
+	id, _, _ = strings.Cut(id, "#")
 	return id
 }
 
@@ -721,6 +758,18 @@ func wslAgentsOf(ds []distro) []*Agent {
 			if a := wslAgent(k, d); a.Detected() {
 				out = append(out, a)
 			}
+		}
+		// the named omp profiles the probe remembered: the row is made
+		// because the probe found it, not because a default omp row is
+		// there, and its detection is that memory
+		for _, name := range d.OmpProfiles {
+			k := wslKindOf("omp")
+			k.id, k.name = "omp#"+name, "omp · "+name
+			k.in = func(at place) *Agent {
+				return ompAt(at, filepath.Join(at.home, ".omp", "profiles", name, "agent"),
+					func() ompProviderEntry { return ompProviderAt(at.gw(), at.version) })
+			}
+			out = append(out, wslAgent(k, d))
 		}
 	}
 	return out
@@ -1044,6 +1093,9 @@ var wslProbeScript = func() string {
 	}
 	// a drive's source in /proc/mounts is C:\ (written C:\134), under any automount root
 	s += `awk '$1 ~ /^[A-Za-z]:/ {print "win:" $2}' /proc/mounts 2>/dev/null; `
+	// named omp profiles: the probe runs only in a distro that is running,
+	// so this never starts a stopped one to find them
+	s += `for d in "$HOME"/.omp/profiles/*; do [ -d "$d" ] && echo "profile:omp:$(basename "$d")"; done; `
 	return s + `ip route show default 2>/dev/null | head -n1 | sed 's/^/route:/'; ` +
 		`grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null | sed 's/^/ns:/'; ` +
 		`command -v wslinfo >/dev/null 2>&1 && echo "net:$(wslinfo --networking-mode 2>/dev/null)"; true`
@@ -1109,6 +1161,15 @@ func parseProbe(name, out string) *distro {
 			// one word; anything else (an old wslinfo's usage) says nothing
 			if m := strings.ToLower(strings.TrimSpace(v)); m != "" && !strings.ContainsAny(m, " \t") {
 				d.Net = m
+			}
+		case "profile":
+			// profile:omp:<name>: a named omp profile the distro has
+			kind, name, _ := strings.Cut(v, ":")
+			if kind != "omp" || !ompProfileOK(name) {
+				continue
+			}
+			if !slices.Contains(d.OmpProfiles, name) {
+				d.OmpProfiles = append(d.OmpProfiles, name)
 			}
 		}
 	}

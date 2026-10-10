@@ -469,11 +469,7 @@ func writeFileAtomic(path string, b []byte) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".magpie-tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return steady.Rename(tmp, path)
+	return steady.WriteFile(path, b, 0o600) // on the disk before it is renamed in (#1505)
 }
 
 // kiroPost posts to a sign-in endpoint.
@@ -782,6 +778,10 @@ func (l kiroLimits) windows() []QuotaWindow {
 // magpie signed in in home, or Kiro's own sign-in's.
 func kiroQuotaAt(ctx context.Context, key, home string) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "kiro", Name: "Kiro", Icon: "kiro-color", Windows: []QuotaWindow{}}
+	if holding(ctx) {
+		q.Error = errNotAsked.Error()
+		return q
+	}
 	a, err := KiroAuthOf(ctx, key, home, false)
 	if err != nil {
 		q.Error = err.Error()

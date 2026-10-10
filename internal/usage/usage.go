@@ -82,7 +82,14 @@ type Record struct {
 	// the tries that failed first are before it, and TTFT-Sent is how
 	// long the vendor took to its first content. 0 where it isn't known
 	// (a reply not streamed, or a vendor magpie doesn't reach over HTTP).
-	Sent   int64 `json:"sent_ms,omitempty"`
+	Sent int64 `json:"sent_ms,omitempty"`
+	// Flow: the ms the reply's content took to come, from where its speed
+	// is counted (DecodeOf): from a tenth of its content to nine tenths,
+	// spread over the whole. A reply a vendor held and let go in one burst
+	// has a flow of next to none, however long its end came after its
+	// first content, and so tells no speed (John on Discord: a Kimi Code
+	// reply read 1,367 tok/s). 0 where it isn't known.
+	Flow   int64 `json:"flow_ms,omitempty"`
 	Status int   `json:"status"`
 	// Error is why a call failed, in the vendor's words and cut short;
 	// ErrType what its body called the error (rate_limit_error,
@@ -106,6 +113,14 @@ type Record struct {
 	Session string `json:"session,omitempty"`
 	// NativeSession retains the client header when X-Magpie-Session overrides it.
 	NativeSession string `json:"native_session,omitempty"`
+	// Subagent is the subagent that made the call, as its agent names it
+	// (Claude Code's x-claude-code-agent-id, the agentId of its
+	// subagents/agent-<id>.jsonl): Session stays the conversation it was
+	// spawned in, so its calls are counted there too. ParentAgent is the
+	// subagent that spawned it in turn (x-claude-code-parent-agent-id), ""
+	// when the conversation itself did or the agent doesn't say.
+	Subagent    string `json:"subagent,omitempty"`
+	ParentAgent string `json:"parent_agent,omitempty"`
 	// Rejected is a request refused locally before an upstream was contacted.
 	Rejected bool `json:"rejected,omitempty"`
 	// Kind is what the agent made the call for when it isn't a turn of
@@ -209,12 +224,29 @@ type Known struct {
 // agent's own description, so they are listed in one place only.
 var Agents func() []Known
 
-var knownAgents = sync.OnceValue(func() []Known {
+// PluginAgents lists the agents plugins add, which come and go as
+// plugins do; package agent sets it.
+var PluginAgents func() []Known
+
+var builtinAgents = sync.OnceValue(func() []Known {
 	if Agents == nil {
 		return nil
 	}
 	return Agents()
 })
+
+// knownAgents are magpie's own agents, then those plugins add.
+func knownAgents() []Known {
+	own := builtinAgents()
+	if PluginAgents == nil {
+		return own
+	}
+	more := PluginAgents()
+	if len(more) == 0 {
+		return own
+	}
+	return append(slices.Clip(own), more...)
+}
 
 // AgentOf names the agent behind a client User-Agent. Known agents map to
 // their magpie id; anything else keeps its product name.
@@ -346,7 +378,29 @@ func DecodeWindow(out int, ms, ttft int64) int64 {
 // in 1.5 s as 1,467 tok/s. Its time goes to the wait before the answer.
 // One with reasoning and no text (all tool calls) tells no speed. The
 // window is DecodeWindow's: 0 for a reply that tells none.
-func DecodeOf(out, reasoning int, ms, ttft, firstText int64) (tokens int, w int64) {
+//
+// A reply its vendor held back and let go in a burst at its end tells
+// none either (John on Discord: Kimi Code answering OpenCode read 1,367,
+// then 2,237 and 2,012 tok/s). The burst is told two ways, as the reply's
+// text came before it or with it:
+//
+//   - flow, when known (Record.Flow), is how long its content took to come
+//     from where its window starts. A window HeldShare times longer had
+//     its content come in a small part of it: the rest was a wait while
+//     the vendor wrote and held it. The time it took to come is not the
+//     time it took to write (a burst let go over 236 ms read 528 tokens at
+//     2,237 tok/s), and that time is not seen, so it tells no speed. A
+//     stream that came as it was written has a flow about its window.
+//   - a reply that reasoned is timed from its first text, its reasoning
+//     written before. When the answer would have been written over
+//     ThinkPace times faster than its reasoning came before it, from the
+//     first content to the first text, its first text came with the burst
+//     and the wait before it was the answer being written and held (22
+//     reasoning tokens over 10.5 s, then 528 answer tokens in 236 ms). A
+//     reasoning hidden from the stream (OpenAI's, Claude's omitted) comes
+//     before the first content and leaves this time short; one that
+//     streams comes at the pace its answer does.
+func DecodeOf(out, reasoning int, ms, ttft, firstText, flow int64) (tokens int, w int64) {
 	start := ttft
 	if reasoning > 0 {
 		out, start = out-reasoning, firstText
@@ -357,12 +411,27 @@ func DecodeOf(out, reasoning int, ms, ttft, firstText int64) (tokens int, w int6
 	if w = DecodeWindow(out, ms, start); w == 0 {
 		return 0, 0
 	}
+	if flow > 0 && flow*HeldShare < w {
+		return 0, 0
+	}
+	if reasoning > 0 && int64(out)*(firstText-ttft) > ThinkPace*int64(reasoning)*w {
+		return 0, 0
+	}
 	return out, w
 }
 
+// HeldShare and ThinkPace tell a reply held back and let go in a burst
+// (DecodeOf): its content came in under a quarter of its window, or its
+// answer at over 20 times the pace its reasoning came. routing.js's
+// decodeOf and app.js's ledDecode have the same.
+const (
+	HeldShare = 4
+	ThinkPace = 20
+)
+
 // Decode is the record's DecodeOf.
 func (r Record) Decode() (tokens int, w int64) {
-	return DecodeOf(r.Output, r.Reasoning, r.Millis, r.TTFT, r.FirstText)
+	return DecodeOf(r.Output, r.Reasoning, r.Millis, r.TTFT, r.FirstText, r.Flow)
 }
 
 // FormatCost renders an effective-price cost, kept in USD everywhere it's
@@ -523,8 +592,14 @@ func summarizeFrom(p Period, now time.Time, first time.Time, historicalKeys map[
 		normalizedKeys[id] = true
 	}
 	historicalKeys = normalizedKeys
+	// a picked range's own days alone: its chart can start on the Monday
+	// before its first, and it ends before now (#1492)
+	from, until := p.Since(now), p.Until(now)
 	visit := func(fn func(Record)) {
 		read(func(r Record) {
+			if r.Time.Before(from) || after(until, r.Time) {
+				return
+			}
 			if next, ok := renamed[r.Provider]; ok {
 				r.Provider = next
 			}
@@ -533,9 +608,7 @@ func summarizeFrom(p Period, now time.Time, first time.Time, historicalKeys map[
 	}
 	s := Summary{Period: p, Bucket: "day", Agents: []Group{}, Models: []Group{}, ProviderKeys: []Group{}, Accounts: []Group{}, CallerKeys: []Group{}, Sessions: []Group{}, Series: []Point{}}
 	s.Since, s.Bucket, s.Series = timeline(p, now, first)
-	if p != Today && p != Week && p != Month {
-		s.Period = All
-	}
+	s.Period = p.shown()
 
 	priceOf := pricer()
 	// the places each provider id went in the period, and goes now
@@ -702,8 +775,12 @@ type Via struct {
 // Vias is what the gateway sent each session's calls to since a time, by
 // agent id and the session's id ("codex|<id>"), the most calls first.
 func Vias(since time.Time) map[string][]Via {
+	return cachedVias(since)
+}
+
+func buildVias(snapshot *logSnapshot, since time.Time) map[string][]Via {
 	out := map[string][]Via{}
-	readLogSnapshot().visit(since, func(r Record) {
+	snapshot.visit(since, func(r Record) {
 		if r.IsRejected() || r.Session == "" || r.Model == "" {
 			return
 		}

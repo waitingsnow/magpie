@@ -345,6 +345,18 @@ level picked is posted for `subagent_effort` alone and lights the square.
 Claude Code's subagents (#468) get no square until it runs through magpie
 (nothing to pick), and one that says "same as model" once it does.
 
+`codex-subagents-lead.test.cjs` draws Codex's subagents square (willz on
+Discord) in Chromium and WebKit, in English, Chinese, Traditional Chinese,
+Japanese and German, at 1100px and 560px. Codex's lead may name a model in
+spawn_agent, and that overrides `default_subagent_model`. So the unset square
+reads "the lead's pick, else same as model" (「由主代理自选，未指定时同主模型」)
+and its title says how to make every subagent use one model. This holds on
+the local row and on a WSL row. The picker opens on "Lead's pick", with the
+model and "unless the lead names another" beside it. Picking a model posts
+`subagent`, and the square still carries the hint. Clicking the first entry
+unsets it again. A click doesn't scroll the page. Claude Code's subagents
+still say "same as model".
+
 `tier-effort.test.cjs` draws Claude Code's per-tier effort (#536) in Chromium
 and WebKit, English and Chinese: no tier's effort is a field of its own; the
 tiers' square lists each tier's model and then its effort (the bars, and "the
@@ -534,6 +546,14 @@ what the provider editor's routing option says (the words already spoken in
 each language), with the story telling whose share went first, while keys
 under Smart keep Smart's chip and the keys' own mode line. It runs in
 English, Chinese, Japanese and German on Chromium and WebKit.
+
+`routing-mode-goes.test.cjs` checks where the stage's routing chip leads
+(xczzhh on X: it always said Smart and nothing changed it). With one key
+on, the chip and the Accounts and keys heading name no routing and the mode
+paragraph says how to get one. With a provider over two keys, the chip and
+the heading are a way to its row under Several accounts or keys: a click
+or Enter brings it into view, marks it and focuses its routing. It runs in
+every language on Chromium and WebKit, at 1100px and 420px.
 
 `balance-fix.test.cjs` opens a custom provider whose balance token sits
 beside new-api's `/api/usage/token` (and a new one with a token and no
@@ -1910,6 +1930,20 @@ control where it was on the screen. It runs in Chromium and WebKit, in
 English and Chinese:
 node --test internal/gui/tests/list-sort.test.cjs
 
+`quota-name-translated.test.cjs` holds the rule that a window's name is
+what magpie translates while its display is shown as it came (#1001): a
+plugin that puts its sentence in the display keeps the card English in
+every language, as the ZCode plugin's claim line did. The fixture is that
+line with its name a sentence magpie knows and a display of the plugin's
+own ("1 · ZCode Trust Build"); the name reads in the language and the
+count and plan name do not. It covers every language magpie has (en, zh,
+zh-TW, ja, de), and each is rendered at 440, 560 and 1000px in Chromium
+and WebKit — a translated name is a sentence, and `.quota-labels > span`
+is nowrap with no ellipsis, so one wider than its `.quota` is cut off
+mid-word in silence. 440 is the narrowest the card is seen at and 560 the
+window minimum; 1000 alone could never catch a name that is too wide:
+node --test internal/gui/tests/quota-name-translated.test.cjs
+
 `quota-pools.test.cjs` checks Antigravity's allowance a row a pool of
 models, each with its 5-hour and its weekly window (a user on Discord: the
 three models read the same, show the 5 hours and the week left): windows
@@ -2047,6 +2081,16 @@ magpie is added (green once it is), its button stands where the other rows'
 model picker does, as wide and lined up with it at 960 and 700px, and a click
 opens the app's link. English and Chinese, Chromium and WebKit.
 
+`omp-profile-connect.test.cjs` checks an omp named profile's switch (#1187):
+clicking **omp · work** posts `/api/agents/connect/omp%23work`, not a path the
+browser cuts at `#`. A query string on the same page (`/api/usage?period=today`)
+stays a query. English, Chromium and WebKit. The API is faked. Without the `#`
+encoding in `api()` the posted path is `/api/agents/connect/omp`.
+
+```sh
+node --test internal/gui/tests/omp-profile-connect.test.cjs
+```
+
 `privacy-hides-accounts.test.cjs` checks that Privacy's Mask personal data
 hides the accounts on screen too (inaction on Discord): until Hide accounts is
 chosen on a computer it follows the setting, so Usage's email address is
@@ -2156,3 +2200,20 @@ keys it matches, the routing header in the other language after
 `setLocale`, the plugins listings arriving while the reader types. In
 English, Chinese, Japanese and German, at 1100px and 440px. `MAGPIE_FILTER_ASSETS` points it
 at another assets folder, to see it fail on the old code.
+
+## Volcengine Ark access key
+
+`volc-access-key.test.cjs` covers #1427: an Ark provider's editor (saved or
+being added) asks for the account's AccessKey ID and Secret Access Key, which
+the Usage page reads the Coding or Agent Plan's windows with. The saved Secret
+is never in the page: only that one is saved, as the placeholder. Save posts
+the ID and a Secret only when a new one was typed; Remove posts
+`clearAccessKey`; an ID with no Secret is refused before anything is posted.
+A relay and DeepSeek have neither field and post none. Every string is in
+zh, zh-TW, ja and de. English and Chinese, Chromium and WebKit.
+`TestProviderSaveKeepsVolcengineSecret` checks the server side.
+
+```sh
+node --test internal/gui/tests/volc-access-key.test.cjs
+go test -tags nogui ./internal/gui -run TestProviderSaveKeepsVolcengineSecret
+```

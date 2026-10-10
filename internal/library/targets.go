@@ -74,12 +74,7 @@ func codebuddyMCP(dir string) string {
 	return all[0]
 }
 
-func codexDir() string {
-	if d := appdir.Getenv("CODEX_HOME"); d != "" {
-		return d
-	}
-	return filepath.Join(home(), ".codex")
-}
+func codexDir() string { return appdir.CodexHomeIn(home()) }
 
 // targetOf is where a known agent keeps them, or nil for one magpie can't
 // give any of them to.
@@ -225,10 +220,13 @@ func targetOf(a *agent.Agent) *Target {
 	case "alma":
 		// Alma reads personal skills from ~/.config/alma/skills, on every
 		// system (its home, not its data folder), and Claude Code's, Codex's
-		// and ~/.agents/skills besides (its skills service, #824); it has
-		// no user-wide instructions file or MCP file of the kind magpie
-		// writes, its prompts being its settings' own
+		// and ~/.agents/skills besides (its skills service, #824). Its MCP
+		// servers are ~/.config/alma/mcp.json's mcpServers, read as Alma
+		// starts and when its MCP settings refresh (0.4.164's
+		// out/main/index.js, #1292). It has no user-wide instructions file,
+		// its prompts being its settings' own
 		t.Skills = filepath.Join(h, ".config", "alma", "skills")
+		t.MCP = &mcpFile{Path: filepath.Join(h, ".config", "alma", "mcp.json"), Format: fmtAlma}
 		t.SkillsAlso = []string{"claude", "codex"}
 	case "cindy":
 		// Cindy keeps its user-wide skills in ~/.agents/skills
@@ -282,8 +280,9 @@ func targetOf(a *agent.Agent) *Target {
 		// Command Code reads ~/.commandcode/mcp.json (getUserMcpConfigPath)
 		t.MCP = &mcpFile{Path: filepath.Join(a.Dir, "mcp.json"), Format: fmtCommandCode}
 		t.Skills = filepath.Join(a.Dir, "skills")
-	case "workbuddy":
-		// WorkBuddy's own servers are mcp.json in its folder
+	case "workbuddy", "workbuddy-ai":
+		// WorkBuddy's own servers are mcp.json in its folder (WorkBuddy
+		// AI's, ~/.workbuddy-ai, for the international build)
 		// ($WORKBUDDY_CONFIG_DIR, else ~/.workbuddy: ConnectorService's
 		// customMcpConfigPath in 5.5.6's app.asar), mcpServers as Claude
 		// Code's, which its CodeBuddy engine runs (type stdio, http or sse).
@@ -320,6 +319,14 @@ func targetOf(a *agent.Agent) *Target {
 		t.Instructions = filepath.Join(a.Dir, "ATOMCODE.md")
 		t.MCP = &mcpFile{Path: filepath.Join(a.Dir, "mcp.json"), Format: fmtOmp}
 		t.Skills = filepath.Join(a.Dir, "skills")
+	case "zed":
+		// Zed reads its MCP servers from context_servers in the settings.json
+		// magpie sets its model in (~/.config/zed, $XDG_CONFIG_HOME/zed,
+		// %APPDATA%\Zed or $MAGPIE_ZED_CONFIG_DIR: agent.zed), and reloads
+		// the file as it changes (crates/settings_content/src/project.rs
+		// ProjectSettingsContent.context_servers, zed-industries/zed
+		// 2c99f547; lc on Discord)
+		t.MCP = &mcpFile{Path: a.Path, Format: fmtZed}
 	case "claude-desktop":
 		// Claude Desktop reads only commands from its file: a remote server
 		// is added in its own Connectors settings. In its 3p mode (magpie's
@@ -327,8 +334,10 @@ func targetOf(a *agent.Agent) *Target {
 		// where that folder is the servers go into both: each mode finds
 		// them, a switch between the two leaves nothing behind in either
 		t.MCP = &mcpFile{Path: filepath.Join(filepath.Dir(a.Path), "claude_desktop_config.json"), Format: fmtDesktop}
-		if p := agent.DesktopConfig3p(h); p != t.MCP.Path && isDir(filepath.Dir(p)) {
-			t.MCP.Also = []string{p}
+		for _, p := range agent.DesktopConfigs3p(h) {
+			if p != t.MCP.Path && isDir(filepath.Dir(p)) {
+				t.MCP.Also = append(t.MCP.Also, p)
+			}
 		}
 		// Cowork's skills, in every account's skills-plugin (#638)
 		if t.Desktop = desktopSkillRoots(a.Dir); len(t.Desktop) > 0 {
@@ -378,7 +387,43 @@ func wslTargetOf(a *agent.Agent) *Target {
 		t.MCP = &mcpFile{Path: filepath.Join(d, "mcp.json"), Format: fmtPiNative, WSL: true, Distro: a.WSL, Home: linuxHome(h)}
 		t.Skills = filepath.Join(d, "skills")
 	default:
+		return wslOwnFolder(a)
+	}
+	return t
+}
+
+// ownFolder are the agents that keep all the library gives them in their
+// own folder (a.Dir, or beside a.Path), read from no variable of this
+// machine's and from nothing under its home: one magpie found in a distro
+// has that folder at the distro's home already, so its target there is
+// the one targetOf makes on this machine, given copies (#1323).
+var ownFolder = map[string]bool{
+	"hermes": true, "omp": true, "opencode": true, "mimocode": true, "droid": true,
+	"grok": true, "commandcode": true, "atomcode": true, "qoder": true, "qoder-cn": true,
+	"minimax-code": true, "fx": true, "dsh": true,
+}
+
+// wslOwnFolder is the target of a, an agent in a running WSL distro that
+// keeps everything in its own folder; nil for any other.
+func wslOwnFolder(a *agent.Agent) *Target {
+	id, at, _ := strings.Cut(a.ID, "@")
+	if !ownFolder[id] {
 		return nil
+	}
+	local := *a
+	local.ID, local.WSL = id, ""
+	t := targetOf(&local)
+	if t == nil {
+		return nil
+	}
+	t.Agent, t.Copy = a, true
+	if t.MCP != nil {
+		t.MCP.WSL, t.MCP.Distro, t.MCP.Home = true, a.WSL, linuxHome(a.Home)
+	}
+	// the skills it reads besides its own are those agents' in the same
+	// distro, not this machine's
+	for i, o := range t.SkillsAlso {
+		t.SkillsAlso[i] = o + "@" + at
 	}
 	return t
 }

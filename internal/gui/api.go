@@ -36,6 +36,7 @@ import (
 	"github.com/yetone/magpie/internal/fonts"
 	"github.com/yetone/magpie/internal/fx"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
@@ -203,6 +204,9 @@ type agentJSON struct {
 	// Joined: connected with its own models still in its list (Codex
 	// signed in with ChatGPT, agent.Agent.Join)
 	Joined bool `json:"joined,omitempty"`
+	// Failover: not connected, yet its requests go through magpie for
+	// account failover alone (agent.Agent.FailingOver, #1385)
+	Failover bool `json:"failover,omitempty"`
 	// CLIMissing: its settings are here, its CLI isn't (#843), which
 	// the row says, and Install another agent offers it again
 	CLIMissing bool               `json:"cliMissing,omitempty"`
@@ -256,6 +260,10 @@ type stateJSON struct {
 	// Unlisted are the models kept for routing groups, which the pickers
 	// don't offer: a filter that finds one of them says why it isn't there
 	Unlisted []unlistedJSON `json:"unlisted,omitempty"`
+	// Recovered are magpie's files a crash left unreadable (all zero,
+	// #1505) that were read from their last good generation: the page
+	// tells the user once each
+	Recovered []lastgood.Note `json:"recovered,omitempty"`
 }
 
 // unlistedJSON is a model of a provider kept for routing groups, and the
@@ -341,12 +349,17 @@ type settingsJSON struct {
 	// that can be named
 	VisionAuto   string     `json:"visionAuto,omitempty"`
 	VisionModels []modelRef `json:"visionModels"`
+	// the Vision the user picked when magpie can't find it any more:
+	// VisionAuto describes in its place, and the row says so
+	VisionMissing string `json:"visionMissing,omitempty"`
 	// the models Codex's thread titles may be sent to (CodexTitles, #705)
 	TitleModels []modelRef `json:"titleModels"`
 	// the model magpie's generate_image tool draws with when ImageGen
 	// names none, and those that can be named
-	ImageGenAuto   string     `json:"imageGenAuto,omitempty"`
-	ImageGenModels []modelRef `json:"imageGenModels"`
+	ImageGenAuto string `json:"imageGenAuto,omitempty"`
+	// the ImageGen the user picked when magpie can't find it any more
+	ImageGenMissing string     `json:"imageGenMissing,omitempty"`
+	ImageGenModels  []modelRef `json:"imageGenModels"`
 	// the web search APIs a model's search goes to when no provider can
 	// search (#419), their keys masked; the ones that can be added; and
 	// the provider that searches first, if one does
@@ -443,7 +456,7 @@ func searchState(s *settingsJSON) {
 	for _, a := range provider.StoredSearchAPIs() {
 		j := searchAPIJSON{Vendor: a.Vendor, Name: a.Name(), URL: a.URL, Ready: a.Ready()}
 		if a.Key != "" {
-			j.Key = provider.Mask(a.Key)
+			j.Key = a.MaskedKey()
 		}
 		s.SearchAPIs = append(s.SearchAPIs, j)
 	}
@@ -512,7 +525,7 @@ func settingsState() settingsJSON {
 	s.MiniMax, s.MiniMaxCheckins = provider.HasMiniMax(), provider.MiniMaxCheckins()
 	s.Qoder, s.QoderCheckins = provider.HasQoder(), provider.QoderCheckins()
 	s.CheckinPlugins = provider.PluginCheckins()
-	s.VisionAuto, s.VisionModels = gateway.AutoVision(), []modelRef{}
+	s.VisionAuto, s.VisionModels, s.VisionMissing = gateway.AutoVision(), []modelRef{}, gateway.VisionMissing()
 	for _, e := range provider.Served() {
 		if e.Images && (e.ImageInput == nil || *e.ImageInput) && (e.Group != "" || e.Provider.Ready()) {
 			m := modelRef{ID: e.ID, Name: e.Name, Provider: e.Provider.ID, PName: e.Provider.Name, Icon: e.Provider.Icon}
@@ -533,7 +546,7 @@ func settingsState() settingsJSON {
 		}
 	}
 	searchState(&s)
-	s.ImageGenAuto, s.ImageGenModels = gateway.AutoDrawer(), []modelRef{}
+	s.ImageGenAuto, s.ImageGenModels, s.ImageGenMissing = gateway.AutoDrawer(), []modelRef{}, gateway.DrawerMissing()
 	for _, p := range provider.All() {
 		if !p.On() || p.DecideOnly() {
 			continue
@@ -991,24 +1004,27 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		// its own. The per-model maps are carried whole rather than named one
 		// by one, so a map added later is not silently dropped here.
 		//
-		// HiddenModels and OrderedModels are the other way round — keyed by
-		// agent, not by "<provider>/<model>" — so they are not among them,
-		// and belong to the Agents page.
+		// HiddenModels, PickedModels and OrderedModels are the other way
+		// round — keyed by agent, not by "<provider>/<model>" — so they are
+		// not among them, and belong to the Agents page.
 		in.Visible, in.HiddenModels, in.OrderedModels = cur.Visible, cur.HiddenModels, cur.OrderedModels
+		in.PickedModels = cur.PickedModels     // "only models I pick" (#1337)
 		in.FastPicks = cur.FastPicks           // switched in the agents' pickers (#954)
 		in.AgentEfforts = cur.AgentEfforts     // picked in an agent's row (#1003)
 		in.PluginCheckins = cur.PluginCheckins // set on its own (plugin-checkin below)
 		settings.CarryPerModel(&in, &cur)
 		in.LAN, in.LANKey = cur.LAN, cur.LANKey
 		in.LANKeyID = cur.LANKeyID
-		in.Port = cur.Port                               // set on its own (port below), which moves the gateway
-		in.CORSOrigins = cur.CORSOrigins                 // set on its own (cors below)
-		in.GitHubToken = cur.GitHubToken                 // set on its own (github-token below), never sent to the page
-		in.RequestArchive = cur.RequestArchive           // the Gateway page's, set on its own
-		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB // in settings.json only
-		in.RedactRules = cur.RedactRules                 // the masking rules, set on their own
+		in.Port = cur.Port                                 // set on its own (port below), which moves the gateway
+		in.CORSOrigins = cur.CORSOrigins                   // set on its own (cors below)
+		in.GitHubToken = cur.GitHubToken                   // set on its own (github-token below), never sent to the page
+		in.RequestArchive = cur.RequestArchive             // the Gateway page's, set on its own
+		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB   // in settings.json only
+		in.GatewayConversations = cur.GatewayConversations // Sessions' explicit recording consent
+		in.RedactRules = cur.RedactRules                   // the masking rules, set on their own
 		// used or left is the Usage page's toggle as much as Settings', set on its own
 		in.QuotaLeft = cur.QuotaLeft
+		in.QuotaReads = cur.QuotaReads // set on its own (quota-reads below)
 		in.UsageOrder = cur.UsageOrder // the Usage page's, dragged there
 		// and what the tray panel's Allowances tab leaves out, set there
 		in.PanelUsageHidden = cur.PanelUsageHidden
@@ -1023,6 +1039,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.CodexTitles = cur.CodexTitles // set on its own (codex-titles below)
 		// and so is the model Codex's auto-review runs on (codex-auto-review)
 		in.CodexAutoReview = cur.CodexAutoReview
+		// and the model Codex's subagents are put on, set in Codex's row
+		in.CodexSubagentModel = cur.CodexSubagentModel
 		in.ChinaMirror = cur.ChinaMirror // the Plugins page's, set on its own
 		// which Codex accounts spend a reset by themselves, set on the Usage card
 		in.CodexAutoReset = cur.CodexAutoReset
@@ -1050,7 +1068,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 				return
 			}
 		}
-		if v := strings.TrimSpace(in.Searcher); v != "" && v != cur.Searcher {
+		if v := strings.TrimSpace(in.Searcher); v != "" && v != "off" && v != cur.Searcher {
 			id, _, _ := strings.Cut(v, "/")
 			if !slices.ContainsFunc(gateway.Searchers(), func(c gateway.SearcherChoice) bool { return c.Provider.ID == id }) {
 				fail(rw, fmt.Errorf("%s can't search the web for other models", id))
@@ -1112,6 +1130,24 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		if changed && onTrayUsage != nil {
 			onTrayUsage()
+		}
+		writeJSON(rw, settingsState())
+	})
+	// when allowances are read: whenever magpie needs them, or only when
+	// the user asks (#1518)
+	mux.HandleFunc("POST /api/settings/quota-reads", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Reads string `json:"reads"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		s := settings.Load()
+		s.QuotaReads = in.Reads
+		if err := settings.Save(s); err != nil {
+			fail(rw, err)
+			return
 		}
 		writeJSON(rw, settingsState())
 	})
@@ -1179,10 +1215,16 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		s := settings.Load()
+		was := s.DesktopLongest
 		s.DesktopLongest = in.On
 		if err := settings.Save(s); err != nil {
 			fail(rw, err)
 			return
+		}
+		// a model listed by its 1M id leaves the window Claude Code is
+		// told for Desktop's others, or joins it (#1458)
+		if was != in.On {
+			catalog.Touched()
 		}
 		writeJSON(rw, settingsState())
 	})
@@ -1721,6 +1763,7 @@ func state() stateJSON {
 			aj.Joined = a.Joined != nil && a.Joined()
 		} else {
 			aj.Source = a.Source()
+			aj.Failover = a.FailingOver != nil && a.FailingOver()
 		}
 		if a.Import != nil {
 			aj.Import, aj.Added = a.Import(), a.Added != nil && a.Added()
@@ -1745,6 +1788,7 @@ func state() stateJSON {
 			s.Profiles = append(s.Profiles, pj)
 		}
 	}
+	s.Recovered = lastgood.Recovered()
 	return s
 }
 

@@ -70,7 +70,7 @@ func parseChat(body []byte) (*Request, error) {
 		return nil, fmt.Errorf("invalid request: %v", err)
 	}
 	r := &Request{Model: c.Model, MaxTokens: c.MaxCompletionTokens, Temp: c.Temperature, TopP: c.TopP,
-		Stream: c.Stream, Effort: effortOf(c.ReasoningEffort), Parallel: c.ParallelToolCalls, Fast: c.ServiceTier == "priority",
+		Stream: c.Stream, Effort: effortOf(c.ReasoningEffort), Parallel: c.ParallelToolCalls, Fast: c.ServiceTier == "priority", Tier: c.ServiceTier,
 		CacheKey: c.PromptCacheKey, Format: openAIFormat(c.ResponseFormat)}
 	if r.MaxTokens == 0 {
 		r.MaxTokens = c.MaxTokens
@@ -215,15 +215,33 @@ func dataURL(p Part) string {
 }
 
 // buildChat renders a request for a Chat Completions upstream.
+// buildHost is the host a request for p is built for. Cursor's plugin is
+// "cursor" (plugin://cursor) moved or not: a moved one's Host is the
+// built-in's, for show, which Cursor's is none, and its fast mode was lost
+// on every request magpie translated (#1360).
+func buildHost(p provider.Provider) string {
+	if p.IsPlugin() && p.PluginProvider() == "cursor" {
+		return "cursor"
+	}
+	return p.Host()
+}
+
+// chatReplaysReasoning is whether a Chat upstream wants a turn's reasoning
+// back in reasoning_content: DeepSeek's models wherever they are served
+// (#388), the model named as the provider names it (OpenCode Go's
+// deepseek-v4.1-flash, whose host doesn't say so), and Command Code's
+// plugin, which replays it for a Go key as the built-in did to
+// /alpha/generate.
+func chatReplaysReasoning(host, model string) bool {
+	return strings.Contains(host, "deepseek") || strings.Contains(strings.ToLower(model), "deepseek") || host == provider.CommandCodePlanID
+}
+
 func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 	var msgs []map[string]any
 	if r.System != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": r.System})
 	}
-	// DeepSeek takes a turn's reasoning back, wherever its models are
-	// served (#388), as Command Code's plugin does for a Go key, as the
-	// built-in replayed it to /alpha/generate
-	replay := strings.Contains(host, "deepseek") || strings.Contains(strings.ToLower(model), "deepseek") || host == provider.CommandCodePlanID
+	replay := chatReplaysReasoning(host, model)
 	// MiniMax's own Chat API gives a model's thinking in the text, between
 	// <think> tags, and wants it back there on the turns after (its
 	// interleaved thinking): the decoder takes it out as thinking (#1267),
@@ -326,6 +344,10 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 				}
 			} else if think != "" && replay {
 				am["reasoning_content"] = think
+			} else if replay && len(calls) > 0 {
+				// a tool call with no thinking (another model's turn), which
+				// DeepSeek turns the whole request away for (#1462)
+				am["reasoning_content"] = noReasoning
 			}
 			msgs = append(msgs, am)
 			continue
@@ -397,6 +419,9 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 	// another's chat upstream may not know the tier
 	if r.Fast && host == "cursor" {
 		out["service_tier"] = "priority"
+	}
+	if r.OwnTier && r.Tier != "" {
+		out["service_tier"] = r.Tier
 	}
 	if r.MaxTokens > 0 {
 		if strings.HasSuffix(host, "openai.com") {
@@ -652,14 +677,31 @@ func thinkingEffort(body []byte) []byte {
 // provider that refused it.
 const thinkingConfigField = "thinking_config"
 
-// geminiMinimalRefused is Gemini turning minimal away for a model that
-// doesn't have it, which names thinking but isn't thinking_config turned
-// away (refusesThinkingConfig): gemini-3.8-flash's 400 "Thinking level is
-// unsupported: THINKING_LEVEL_MINIMAL", for reasoning_effort minimal and
-// thinking_level minimal alike, at Vertex AI's OpenAI-compatible API; and
-// gemini-3.1-pro-preview's "thinking_level MINIMAL is not supported by this
-// model" at its generateContent.
-var geminiMinimalRefused = regexp.MustCompile(`(?i)thinking[ _]level.*minimal`)
+// gemini3Levels are the levels Gemini 3 thinks at, of which a model may
+// take only some (gemini-3.8-flash has no minimal): those it is asked at
+// where its own aren't known.
+var gemini3Levels = []string{"minimal", "low", "medium", "high"}
+
+// geminiLevelRefused is Gemini turning away a thinking level the model
+// hasn't, which names thinking but isn't thinking_config turned away
+// (refusesThinkingConfig): gemini-3.8-flash's 400 "Thinking level MINIMAL
+// is not supported for this model. Please retry with other thinking level."
+// at AI Studio's OpenAI-compatible API, and "Thinking level is unsupported:
+// THINKING_LEVEL_MINIMAL" at Vertex AI's, for reasoning_effort minimal and
+// thinking_level minimal alike; and gemini-3.1-pro-preview's
+// "thinking_level MINIMAL is not supported by this model" at its
+// generateContent.
+var geminiLevelRefused = regexp.MustCompile(`(?i)thinking[ _]level\W+(?:(minimal|low|medium|high)\W+is not supported|is unsupported\W+thinking_level_(minimal|low|medium|high))`)
+
+// geminiRefusedLevel is the thinking level Gemini turned away in body
+// (geminiLevelRefused), or "".
+func geminiRefusedLevel(body []byte) string {
+	m := geminiLevelRefused.FindSubmatch(body)
+	if m == nil {
+		return ""
+	}
+	return strings.ToLower(string(m[1]) + string(m[2]))
+}
 
 // refusesThinkingConfig recognizes an upstream turning a request away for
 // the thinking_config it was sent, by its error naming it.
@@ -1105,6 +1147,9 @@ func renderChat(res Result, model string) []byte {
 	for _, p := range res.Parts {
 		switch p.Kind {
 		case Text:
+			if p.Text == "" && p.Signature != "" {
+				continue // only Gemini's signature on its text, which is Gemini's
+			}
 			if msg["content"] == nil {
 				msg["content"] = p.Text
 			} else {

@@ -26,6 +26,9 @@ type groupsJSON struct {
 	// Moved: the agents turning found groups off moved off one of them,
 	// to its model from one provider (agent.Reseat)
 	Moved []agent.Move `json:"moved,omitempty"`
+	// Templates: groups for common needs made of the user's own models,
+	// which the page adds in a click (provider.Templates)
+	Templates []provider.Template `json:"templates"`
 }
 
 type groupJSON struct {
@@ -55,6 +58,9 @@ type memberJSON struct {
 	Model    string `json:"model,omitempty"` // what the vendor is asked for
 	On       int    `json:"on"`              // its keys or accounts on
 	Group    bool   `json:"group,omitempty"` // a routing group in the group; Name is its
+	// ProviderOff: its provider is switched off, so the group skips it
+	// until it is on again; Provider, Name, Icon and Model are still said
+	ProviderOff bool `json:"providerOff,omitempty"`
 	// Of is the model's id without the effort the member is fixed at, and
 	// Effort that effort ("provider/model:low"); "" for one without
 	Of     string `json:"of,omitempty"`
@@ -170,7 +176,7 @@ func keyPools(p provider.Provider) []poolJSON {
 }
 
 func groupsState() groupsJSON {
-	out := groupsJSON{Groups: []groupJSON{}, Models: []modelRef{}, Pools: []poolJSON{}, Deciders: []modelRef{}, Found: provider.AutoGroupsOn()}
+	out := groupsJSON{Groups: []groupJSON{}, Models: []modelRef{}, Pools: []poolJSON{}, Deciders: []modelRef{}, Found: provider.AutoGroupsOn(), Templates: provider.Templates()}
 	for _, e := range provider.Deciders() {
 		out.Deciders = append(out.Deciders, modelRef{ID: e.ID, Name: e.Name, Provider: e.Provider.ID, PName: e.Provider.Name, Icon: e.Provider.Icon})
 	}
@@ -236,6 +242,10 @@ func groupsState() groupsJSON {
 					}
 				}
 				gj.Ready = true
+			} else if pid, model, ok := strings.Cut(of, "/"); ok {
+				if p, err := provider.Find(pid); err == nil && !p.On() {
+					m.ProviderOff, m.Provider, m.Name, m.Icon, m.Model = true, p.ID, p.Name, p.Icon, model
+				}
 			}
 			gj.Info = append(gj.Info, m)
 		}
@@ -283,6 +293,9 @@ func groupRoutes(mux *http.ServeMux) {
 			Order []string `json:"order"`
 			// delete: several groups at once, all or none
 			IDs []string `json:"ids"`
+			// template: which one, saved under the group's name
+			// (provider.AddTemplate)
+			Kind string `json:"kind"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			fail(rw, err)
@@ -319,6 +332,11 @@ func groupRoutes(mux *http.ServeMux) {
 			}
 		case "show":
 			err = provider.ShowGroup(in.ID)
+		case "copy":
+			// a group as it is, under name (provider.CopyGroup)
+			_, err = provider.CopyGroup(in.ID, in.Name)
+		case "template":
+			_, err = provider.AddTemplate(body.Kind, in.Name)
 		case "switch":
 			// a group of the user's on or off, kept as it is (PAMI on Discord)
 			err = provider.SwitchGroup(in.ID, body.On)

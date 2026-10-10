@@ -8,6 +8,7 @@
   if (!page) return;
 
   let lib = null;        // the page, as /api/library gives it
+  let taken = 0;         // how many times lib was set, for a read to tell a newer answer came first
   let tab = "instructions";
   let shown = "";        // the tab the page last drew, which fades in only when it changes
   let fits = [];         // textareas to fit before the page is painted
@@ -21,6 +22,7 @@
   let probe = null;      // skills found at a source: { source, candidates, pick:Set, agents:Set }
   let probing = false;
   let checking = false;  // asking GitHub which skills it has changed
+  let autoChecked = false; // the page checked by itself, as the server said it was due (#1449)
   let modal = null;      // what the library has open in the dialog
 
   const GLYPH = {
@@ -386,6 +388,7 @@
   function take(v) {
     const was = lib && shelf();
     lib = v;
+    taken++;
     for (const w of writing.values()) {
       const x = lib[w.list].find((y) => y.name === w.name);
       if (x) x.agents = w.want;
@@ -419,13 +422,35 @@
   // quiet is a read on coming back to the window: the page is drawn again
   // only when the library changed meanwhile, so a click that brings the
   // window forward doesn't redraw what it clicked on.
+  // The first read is a glance: the page but for the skills the agents
+  // have of their own and which copies are out of date, which take reading
+  // their skill folders through, and on a machine with many big skills
+  // that took minutes before anything showed (0day404, #541). It is drawn
+  // at once, and the whole page after it; only the Skills tab shows what
+  // the glance left out, so the others aren't drawn again for it.
   async function load(quiet) {
-    if (!lib) renderLoading();
+    let glanced = false;
+    if (!lib) {
+      renderLoading();
+      const at = taken;
+      try {
+        const g = await api("library?glance=1");
+        if (!lib && taken === at) {
+          take(g);
+          glanced = true;
+          render();
+        }
+      } catch {}
+    }
     try {
+      const at = taken;
       const v = await api("library");
+      // a change answered meanwhile, with the library as it is after it
+      if (taken !== at) return;
       const was = lib && seen(lib);
       take(v);
-      if (quiet === true && seen(lib) === was) return;
+      if (glanced && tab !== "skills") return;
+      if ((quiet === true || glanced) && seen(lib) === was) return;
       rtk = null; // asked again when its tab is drawn: an agent may have been installed since
       render();
     } catch (e) {
@@ -613,12 +638,31 @@
       render(); syncLists();
     });
     tabs.classList.add("lib-tabs");
-    head.append(tabs, el("span", "grow"));
+    head.append(tabs);
+    // the buttons keep together at the end, on a line of their own when the
+    // window is too narrow for the tabs and them
+    const acts = el("span", "lib-headacts");
+    // The market sits under everything the tab lists, many screens down with
+    // dozens of skills (#1348): the strip that stays at the top goes to it.
+    if (lib && (tab === "mcp" || tab === "skills")) {
+      const go = button("", "lib-discover", (e) => {
+        const mk = page.querySelector(`.mk[data-market="${tab}"]`);
+        if (!mk || !window.scrollOnPurpose?.(e, 1500)) return;
+        // its heading just under the strip, however many lines that takes
+        const top = mk.getBoundingClientRect().top - page.getBoundingClientRect().top + page.scrollTop - head.getBoundingClientRect().height - 8;
+        page.scrollTo({ top, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+        mk.querySelector("input")?.focus({ preventScroll: true });
+      });
+      go.append(glyph(GLYPH.search, "lib-mini"), el("span", "", t("Discover")));
+      go.title = tab === "mcp" ? t("Go to the MCP servers you can add, under the list") : t("Go to the skills you can add, under the list");
+      acts.append(go);
+    }
     const more = button("", "lib-more", () => lib && reveal(lib.dir));
     more.append(glyph(GLYPH.folder, "lib-mini"), el("span", "", t("Library folder")));
     if (lib) more.title = tilde(lib.dir);
     else more.disabled = true;
-    head.append(more);
+    acts.append(more);
+    head.append(acts);
     return head;
   }
 
@@ -1287,9 +1331,10 @@
     if (skip.length) body.append(el("p", "lib-aside", t("{agents} has no MCP servers magpie can write.", { agents: skip.map((a) => a.name).join(", ") })));
     // WorkBuddy connects a server only once it is trusted there, again
     // after its command or address changes (#1266)
-    const wb = shownAgents().find((a) => a.id === "workbuddy" && a.mcp);
-    if (wb && lib.servers.some((s) => s.agents?.includes(wb.id))) {
-      body.append(el("p", "lib-aside lib-wb-trust", t("{agent} connects a server only once you trust it: switch it on in {agent}'s MCP settings, and again after its command or address changes.", { agent: wb.name })));
+    for (const wb of shownAgents().filter((a) => (a.id === "workbuddy" || a.id === "workbuddy-ai") && a.mcp)) {
+      if (lib.servers.some((s) => s.agents?.includes(wb.id))) {
+        body.append(el("p", "lib-aside lib-wb-trust", t("{agent} connects a server only once you trust it: switch it on in {agent}'s MCP settings, and again after its command or address changes.", { agent: wb.name })));
+      }
     }
     body.append(discover("mcp"));
   }
@@ -1358,7 +1403,13 @@
       case "notfound": return [t("can't start: {cmd} not found", { cmd: h.detail }), t("Can't start it: there is no {cmd} on the PATH magpie has", { cmd: h.detail })];
       case "start": return [t("can't start"), more(t("Can't start it"))];
       case "exited": return [h.code ? t("exited ({code})", { code: h.code }) : t("exited"), more(h.code ? t("It exited with code {code} before listing its tools", { code: h.code }) : t("It exited before listing its tools"))];
-      case "timeout": return [t("no answer"), more(t("No answer in 15 seconds"))];
+      // which step went unanswered, and for how long (#1467): a slow server
+      // lists its tools long after it initialized
+      case "timeout": {
+        const n = Math.round((h.waited || 0) / 1000);
+        if (!h.step) return [t("no answer"), more(t("No answer in {n} seconds", { n }))];
+        return [t("no answer to {step}", { step: h.step }), more(t("No answer to {step} in {n} seconds", { step: h.step, n }))];
+      }
       case "http": return ["HTTP " + h.code, t("The server answered {status}", { status: h.detail })];
       case "refused": return [t("connection refused"), more(t("Nothing is listening at that address"))];
       case "unreachable": return [t("can't reach"), more(t("Can't reach the server"))];
@@ -1639,6 +1690,7 @@
       if (!await confirmRemoval(s.name, "It will be removed from the library and the agents it was given to.")) return;
       if (await change("servers/remove", { name: s.name }, t("{name} is out of the library and the agents it was given to", { name: s.name }))) closeLibModal(true);
     }));
+    if (s && projectMCPAgents().length) bar.append(copyConfigButton([s.name]));
     bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal));
     // send saves the form; s is then the server as saved, for a save after
     // a sign-in's to be of it
@@ -1777,7 +1829,14 @@
         if (checking) c.classList.add("busy");
         rh.append(c);
       }
-      const stale = lib.skills.filter((s) => s.check?.status === "update");
+      // not checked since magpie started, or not for a while: the page
+      // checks by itself, once, after it is drawn (#1449)
+      if (lib.checkDue && !checking && !autoChecked) {
+        autoChecked = true;
+        setTimeout(() => checkSkills(true), 0);
+      }
+      // one changed here is updated from its own row, which asks first
+      const stale = lib.skills.filter((s) => s.check?.status === "update" && !s.edited);
       if (stale.length) {
         const n = stale.length;
         const u = button(t("Update {n}", { n }), "action lib-updall", async (e, b) => {
@@ -1807,7 +1866,13 @@
       if (picking) body.append(pickBar(all));
     }
     if (lib.newSkills?.length) renderNewSkills(body);
-    if (lib.foundSkills.length) {
+    // a glance hasn't looked through the agents' own skills yet (#541)
+    if (lib.partial) {
+      const rh = el("div", "row-head lib-found-wait");
+      rh.setAttribute("aria-busy", "true");
+      rh.append(el("span", "label", t("In your agents")), el("span", "grow"), el("span", "note", t("Looking through the agents' skill folders…")));
+      body.append(rh);
+    } else if (lib.foundSkills.length) {
       const rh = el("div", "row-head");
       rh.append(el("span", "label", t("In your agents")), el("span", "grow"), el("span", "note", t("not in the library — bring one in to give it to the others")));
       // every one at once, rather than a click for each
@@ -2180,7 +2245,8 @@
     who.append(el("div", "sub", filtering && hits.length !== n ? t("{n} of {total} skills", { n: hits.length, total: n })
       : n === 1 ? t("1 skill") : t("{n} skills", { n })));
     const tags = el("div", "lib-tags");
-    const stale = g.skills.filter((s) => s.check?.status === "update");
+    // one changed here is updated from its own row, which asks first (#1449)
+    const stale = g.skills.filter((s) => s.check?.status === "update" && !s.edited);
     if (stale.length) {
       const u = button(t("Update {n}", { n: stale.length }), "action lib-updall", async (e, b) => {
         b.classList.add("busy");
@@ -2383,12 +2449,40 @@
           bar.append(ub);
         }
       }
+      if (servers && projectMCPAgents().length) bar.append(copyConfigButton(skills.map((x) => x.name)));
       const c = button(t("Clear"), "lib-updall lib-pickclear", () => { picked.clear(); syncPicks(); });
       c.title = t("Unpick them all");
       bar.append(c);
     }
     bar.append(button(t("Done"), "action lib-updall lib-pickdone", () => { picking = ""; picked.clear(); render(); }));
     return bar;
+  }
+
+  // Copy config… (#1478, xiaozhu1337): the servers named as an agent's
+  // project file has them — what magpie would write into a project it
+  // keeps — on the clipboard, for a project the user adds them to by hand.
+  // A server the agent can't take that way is left out, and said.
+  function copyConfigButton(names) {
+    const b = button(t("Copy config…"), "lib-updall lib-copyconfig", () => {
+      const opts = projectMCPAgents().map((a) => ({ v: a.id, name: a.name, literalName: true, note: a.projectMCP }));
+      openProtoMenu(b, opts, "", async (id) => {
+        const a = projectMCPAgents().find((x) => x.id === id);
+        if (!a) return;
+        try {
+          const c = await api("library/mcp/config", { agent: id, names });
+          const out = (c.skipped || []).join(", ");
+          if (!c.text) return status(t("{agent} can't take {names} from a project's file", { agent: a.name, names: out }), "err", 6000);
+          await copy(c.text, "", b, out
+            ? t("Copied for {agent}, to paste into {file} in your project. Left out, as {agent} can't take them there: {names}", { agent: a.name, file: c.file, names: out })
+            : t("Copied for {agent}, to paste into {file} in your project", { agent: a.name, file: c.file }));
+        } catch (e) {
+          status(e.message, "err", 6000);
+        }
+      }, "Copy as an agent's project file", "", "right");
+    });
+    b.title = names.length === 1 ? t("Copy {name} as an agent's project file has it, to paste into a project yourself", { name: names[0] })
+      : t("Copy these servers as an agent's project file has them, to paste into a project yourself");
+    return b;
   }
 
   // The bar asking a group's name for the skills picked: a new group's, or
@@ -2898,9 +2992,19 @@
       take(v);
       const res = v.result || {};
       const up = res.updated?.length || 0, no = res.unupdated || [];
+      // one changed here is left as it is (#1449): said apart from those
+      // that couldn't be fetched
+      const isEdited = (p) => lib.skills.some((s) => s.edited && "skill:" + s.name === p.what);
+      const kept = no.filter(isEdited).map((p) => p.what.replace(/^skill:/, "")), failed = no.filter((p) => !isEdited(p));
       if (no.length) {
-        const p = no[0];
-        status(t("{name} wasn't updated: {error}", { name: p.what.replace(/^skill:/, ""), error: p.error }) + (no.length > 1 ? " " + t("(and {n} more)", { n: no.length - 1 }) : "") + (up ? " · " + t("{n} up to date", { n: up }) : ""), "warn", 8000);
+        const parts = [];
+        if (failed.length) {
+          const p = failed[0];
+          parts.push(t("{name} wasn't updated: {error}", { name: p.what.replace(/^skill:/, ""), error: p.error }) + (failed.length > 1 ? " " + t("(and {n} more)", { n: failed.length - 1 }) : ""));
+        }
+        if (kept.length) parts.push(t("Kept as you changed them: {names}. Update each from its row to replace your changes.", { names: kept.join(", ") }));
+        if (up) parts.push(t("{n} up to date", { n: up }));
+        status(parts.join(" · "), "warn", 10000);
       } else report(res, t("{n} skills up to date", { n: up }));
       render();
     } catch (e) {
@@ -3207,7 +3311,9 @@
 
   // Which skills GitHub changed since they were installed: each row says,
   // and the heading offers to update just those.
-  async function checkSkills() {
+  // quiet is the page's own check as it opens the skills: it says only
+  // what there is to update or add, and nothing when there is nothing.
+  async function checkSkills(quiet) {
     if (checking) return;
     checking = true;
     render();
@@ -3219,12 +3325,17 @@
       let msg = n ? (n === 1 ? t("1 skill has an update") : t("{n} skills have updates", { n })) : t("Every skill is up to date");
       const more = lib.newSkills?.length || 0;
       if (more) msg += " · " + (more === 1 ? t("1 more skill in their repositories") : t("{n} more skills in their repositories", { n: more }));
-      if (unknown.length) {
+      if (quiet) {
+        const said = [];
+        if (n) said.push(n === 1 ? t("1 skill has an update") : t("{n} skills have updates", { n }));
+        if (more) said.push(more === 1 ? t("1 more skill in their repositories") : t("{n} more skills in their repositories", { n: more }));
+        if (said.length) status(said.join(" · "), "ok");
+      } else if (unknown.length) {
         msg += " · " + t("{n} couldn't be checked: {error}", { n: unknown.length, error: checkError(unknown[0].check) });
         status(msg, "warn", 8000);
       } else status(msg, "ok");
     } catch (e) {
-      status(e.message, "err", 6000);
+      if (!quiet) status(e.message, "err", 6000);
     }
     checking = false;
     // drawn after the await, a page that can't be drawn says why, as one
@@ -3386,6 +3497,9 @@
     } else if (c?.status === "unknown") {
       nm.append(tag(t("Not checked"), "lib-unchecked", checkError(c)));
     }
+    // changed here since it was fetched from GitHub (#1449): an update asks
+    // before it replaces that
+    if (s.edited) nm.append(tag(t("Changed here"), "warn lib-edited", t("You changed it since it was fetched from GitHub. Updating asks before it replaces your changes.")));
     // a copy in an agent that differs from the library's skill (#896): a
     // sync makes it again
     if (s.behind?.length) {
@@ -3418,6 +3532,7 @@
     const acts = el("div", "lib-rowacts");
     if (s.kind === "github" || s.origin) {
       const u = button("", "lib-icon", async (e, b) => {
+        if (s.edited) return confirmUpdateEdited(s);
         b.classList.add("busy");
         await change("skills/update", { name: s.name }, t("{name} is up to date", { name: s.name }));
         b.classList.remove("busy");
@@ -3426,6 +3541,7 @@
       u.title = s.origin ? t("Update from GitHub ({repo}, as CC Switch installed it)", { repo: s.origin.replace(/^https:\/\/github\.com\//, "") }) : t("Update from GitHub");
       if (c?.status === "current") u.title += "\n" + t("Up to date with GitHub") + "\n" + checkLine(c);
       else if (c?.status === "update") u.title += "\n" + checkLine(c);
+      if (s.edited) u.title += "\n" + t("Changed here: asks before it replaces your changes");
       acts.append(u);
     }
     const rm = button("", "lib-icon danger", () => confirmRemoveSkill(s));
@@ -3437,6 +3553,26 @@
     row.onclick = () => viewSkill(s);
     row.title = t("Read {name}'s SKILL.md", { name: s.name });
     return row;
+  }
+
+  // An update of a skill changed here replaces the change (#1449): asked in
+  // the page, and the version replaced is kept with the backups.
+  function confirmUpdateEdited(s) {
+    const ed = el("div", "editor lib-editor lib-update-edited");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.up), el("b", "", t("Replace your changes to {name}?", { name: s.name })));
+    ed.append(head);
+    ed.append(el("p", "lib-confirm", t("You changed {name} here since it was fetched from GitHub. Updating puts GitHub's version in its place. Yours is kept in magpie's backups (Backups, at the foot of the Library).", { name: s.name })));
+    const bar = el("div", "bar");
+    const go = button(t("Update"), "primary", async () => {
+      go.disabled = true;
+      if (await change("skills/update", { name: s.name, replace: true }, t("{name} is up to date; your version is in the backups", { name: s.name }))) closeLibModal(true);
+      else go.disabled = false;
+    });
+    bar.append(el("span", "grow"), button(t("Keep mine"), "", closeLibModal), go);
+    ed.append(bar);
+    modal = { save: () => go.click() };
+    openLib(ed);
   }
 
   function confirmRemoveSkill(s) {
@@ -3496,8 +3632,31 @@
       : f.shared ? t("Keeps it where it is in the shared skills folder and links to it: you can give it to any agent")
       : f.link ? t("Keeps a link to where it is: {agents} go on having it, and you can give it to the others", { agents: [...f.agents, ...(f.copies || [])].map(nameOf).join(", ") })
       : t("Moves it into the library and links it back: {agents} go on having it, and you can give it to the others", { agents: [...f.agents, ...(f.copies || [])].map(nameOf).join(", ") });
-    row.append(b);
+    // gone from the agents without bringing it in first (#1303)
+    const rm = button("", "lib-icon danger", () => confirmRemoveFoundSkill(f));
+    rm.append(svg(GLYPH.trash, 13, 1.4));
+    rm.title = t("Remove");
+    row.append(b, rm);
     return row;
+  }
+
+  function confirmRemoveFoundSkill(f) {
+    const ed = el("div", "editor lib-editor");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.trash), el("b", "", t("Remove {name}?", { name: f.name })));
+    ed.append(head);
+    const agents = [...f.agents, ...(f.copies || [])].map(nameOf).filter(Boolean);
+    ed.append(el("p", "lib-confirm", !agents.length ? t("Its folder is moved to magpie's backups.")
+      : f.link ? t("It is taken out of {agents}. The folder it was linked from stays where it is.", { agents: agents.join(", ") })
+      : t("It is taken out of {agents}, and its folder is moved to magpie's backups.", { agents: agents.join(", ") })));
+    if (f.shared) ed.append(el("p", "lib-confirm", t("Its entry in {path} goes to the backups too, so no agent reads it from there.", { path: f.shared })));
+    if (f.others?.length) ed.append(el("p", "lib-confirm", t("{agents} has another skill by this name; that one stays.", { agents: f.others.map(nameOf).join(", ") })));
+    const bar = el("div", "bar");
+    const go = button(t("Remove"), "primary danger-fill", async () => { if (await change("skills/remove-found", { name: f.name }, t("{name} removed", { name: f.name }))) closeLibModal(true); });
+    bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
+    ed.append(bar);
+    modal = { save: () => go.click() };
+    openLib(ed);
   }
 
   // ---------- the market ----------
@@ -3651,7 +3810,13 @@
     img.referrerPolicy = "no-referrer";
     img.src = "/api/library/icon?u=" + encodeURIComponent(url);
     if (/\.svg(\?|$)/i.test(url)) box.classList.add("svg");
-    img.onerror = fallback;
+    // a first fetch from GitHub can fail once (magpie-community's avatar
+    // showed an M on the user's first look), so it's asked once more
+    img.onerror = () => {
+      if (img.dataset.again) return fallback();
+      img.dataset.again = "1";
+      setTimeout(() => { if (img.isConnected) img.src = "/api/library/icon?again=1&u=" + encodeURIComponent(url); }, 2000);
+    };
     box.append(img);
     return box;
   }
@@ -3882,7 +4047,7 @@
   // The dialog is the providers page's; while the library has it, its
   // backdrop and Escape close it here.
   $("#modal").addEventListener("click", (e) => {
-    if (modal && e.target === e.currentTarget) { e.stopImmediatePropagation(); closeLibModal(); }
+    if (modal && modalBackdrop(e)) { e.stopImmediatePropagation(); closeLibModal(); }
   }, true);
   document.addEventListener("keydown", (e) => {
     if (!confirmationPending && modal && e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closeLibModal(); }

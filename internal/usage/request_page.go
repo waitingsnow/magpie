@@ -52,14 +52,17 @@ type RequestPage struct {
 	// other computer's calls were brought here by sync (#542)
 	Computers []Share
 	Names     map[string]string
+	// Heat is the rows by day, as the chart's filter keeps them: only for
+	// the heatmap's own period (HeatmapOf)
+	Heat *Heatmap
 }
 
 type packedRow struct {
 	Time                           time.Time
-	Text                           [28]uint32
+	Text                           [30]uint32
 	Tokens                         [6]int64
 	Millis, TTFT, FirstText, Order int64
-	Sent                           int64
+	Sent, Flow                     int64
 	RouteID                        int64
 	Cost                           float64
 	Status                         int32
@@ -81,10 +84,10 @@ type rowChunk struct {
 }
 
 // rowMsg is the Text of a row's Claude message id, after rowText's
-const rowMsg = 27
+const rowMsg = 29
 
-func rowText(r *Row) [27]*string {
-	return [27]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream}
+func rowText(r *Row) [29]*string {
+	return [29]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent}
 }
 func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 	if c.dict == nil {
@@ -101,7 +104,7 @@ func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 		c.Bytes += int64(len(s) + 48)
 		return id
 	}
-	p := packedRow{Time: r.Time, Tokens: [6]int64{int64(r.Input), int64(r.Output), int64(r.CacheRead), int64(r.CacheWrite), int64(r.Reasoning), int64(r.CacheWrite1h)}, Millis: r.Millis, TTFT: r.TTFT, FirstText: r.FirstText, Sent: r.Sent, Order: order, RouteID: r.RouteID, Cost: r.Cost, Status: int32(r.Status)}
+	p := packedRow{Time: r.Time, Tokens: [6]int64{int64(r.Input), int64(r.Output), int64(r.CacheRead), int64(r.CacheWrite), int64(r.Reasoning), int64(r.CacheWrite1h)}, Millis: r.Millis, TTFT: r.TTFT, FirstText: r.FirstText, Sent: r.Sent, Flow: r.Flow, Order: order, RouteID: r.RouteID, Cost: r.Cost, Status: int32(r.Status)}
 	for i, s := range rowText(&r) {
 		p.Text[i] = intern(*s)
 	}
@@ -133,12 +136,12 @@ func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 }
 func (c *rowChunk) row(i int) Row {
 	p := &c.Rows[i]
-	r := Row{Record: Record{RouteID: p.RouteID, Time: p.Time, Input: int(p.Tokens[0]), Output: int(p.Tokens[1]), CacheRead: int(p.Tokens[2]), CacheWrite: int(p.Tokens[3]), CacheWrite1h: int(p.Tokens[5]), Reasoning: int(p.Tokens[4]), Millis: p.Millis, TTFT: p.TTFT, FirstText: p.FirstText, Sent: p.Sent, Status: int(p.Status), Rejected: p.Flags&4 != 0, SessionOfficialLogin: p.Flags&8 != 0}, Cost: p.Cost, Priced: p.Flags&1 != 0, Swapped: p.Flags&2 != 0, Routed: p.Flags&32 != 0}
+	r := Row{Record: Record{RouteID: p.RouteID, Time: p.Time, Input: int(p.Tokens[0]), Output: int(p.Tokens[1]), CacheRead: int(p.Tokens[2]), CacheWrite: int(p.Tokens[3]), CacheWrite1h: int(p.Tokens[5]), Reasoning: int(p.Tokens[4]), Millis: p.Millis, TTFT: p.TTFT, FirstText: p.FirstText, Sent: p.Sent, Flow: p.Flow, Status: int(p.Status), Rejected: p.Flags&4 != 0, SessionOfficialLogin: p.Flags&8 != 0}, Cost: p.Cost, Priced: p.Flags&1 != 0, Swapped: p.Flags&2 != 0, Routed: p.Flags&32 != 0}
 	for i, s := range rowText(&r) {
 		*s = c.Strings[p.Text[i]]
 	}
-	if r.Swapped && (SameSpelled(r.Model, r.Served) || GeminiServing(r.Model, r.Served)) {
-		r.Swapped = false // kept before a name spelled otherwise, or Google's serving name, was the same
+	if r.Swapped && (SameSpelled(r.Model, r.Served) || ServingName(r.Model, r.Served) || RelayRenamed(r.Model, r.Served)) {
+		r.Swapped = false // kept before a name spelled otherwise, a vendor's serving name or a relay's rename was the same
 	}
 	r.Computer = c.Computer
 	return r
@@ -740,14 +743,14 @@ func buildRequestPage(p Period, f Filter, offset, limit int, gateway *rowChunk, 
 // days are read from it.
 func buildRequestBlocks(p Period, f Filter, offset, limit int, now time.Time, gateways, chunks, others []*rowChunk, names map[string]string) RequestPage {
 	skip := visibleLocal(chunks)
-	since := p.Since(now)
+	since, until := p.Since(now), p.Until(now)
 	matched := matchedBlocks(gateways, chunks, skip, since, true)
 	all := append(append(slices.Clone(gateways), chunks...), others...)
 	visit := func(fn func(rowRef, Row)) {
 		for _, c := range all {
 			for i, pr := range c.Rows {
 				ref := rowRef{c, i}
-				if pr.Time.Before(since) || skip[ref] || matched[ref] {
+				if pr.Time.Before(since) || after(until, pr.Time) || skip[ref] || matched[ref] {
 					continue
 				}
 				fn(ref, c.row(i))
@@ -951,6 +954,15 @@ func buildRequestBlocks(p Period, f Filter, offset, limit int, now time.Time, ga
 			pt.By[d][k] = part
 		}
 	})
+	if p == heatmapPeriod {
+		out.Heat = heatmapOf(since, now, func(add func(Row)) {
+			visit(func(_ rowRef, r Row) {
+				if chartFilter.keepsRow(r) {
+					add(r)
+				}
+			})
+		})
+	}
 	// Match LedgerSeries's top-24 selection on the filtered data, not facets.
 	for _, d := range Dimensions {
 		kept := map[string]bool{}
@@ -1018,6 +1030,13 @@ func pageFromLedgerAt(p Period, f Filter, offset, limit int, all Ledgered, now t
 		out.ChartBy = map[string][]Share{}
 	}
 	out.Bucket, out.Series = ledgerSeriesAt(p, chartRows, now)
+	if p == heatmapPeriod {
+		out.Heat = heatmapOf(p.Since(now), now, func(add func(Row)) {
+			for _, r := range chartRows {
+				add(r)
+			}
+		})
+	}
 	for _, d := range Dimensions {
 		g := f
 		if d == "provider" {

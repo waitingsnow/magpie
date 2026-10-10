@@ -37,6 +37,7 @@
   const OUTL = "M9.5 3.5h3v3 M12.5 3.5 7.5 8.5 M11 9.5v3H3.5V5h3";
   const PLUG = "M6 2v3 M10 2v3 M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0z M8 11v3";
   const PIPE = "M1.5 8h3 M11.5 8h3 M4.5 4.5h7v7h-7z";
+  const TERM = "M2 3.5h12v9H2z M4.5 6.5l2 1.5-2 1.5 M8 9.5h3";
   const FOLDER = "M14.7 12.7a1.3 1.3 0 0 1-1.3 1.3H2.6a1.3 1.3 0 0 1-1.3-1.3V3.3A1.3 1.3 0 0 1 2.6 2h3.3l1.3 2h6.2a1.3 1.3 0 0 1 1.3 1.3z";
 
   const name = (spec) => { const i = spec.lastIndexOf("@"); return i > 0 && !spec.startsWith(".") && !spec.includes("/", i) ? spec.slice(0, i) : spec; };
@@ -70,27 +71,54 @@
   const onNPM = (spec) => !isPath(spec) && !isGit(spec);
   // the providers a plugin signs in to, as the add sheet knows them
   const subsOf = (pkg) => (providers?.plugins || []).filter((x) => name(x.spec) === pkg);
+  // whether version a comes after b, in semver's order, the same as
+  // update.Newer, which puts the dot on Plugins: a pre-release before its
+  // release, numbers in it as numbers ("beta.10" after "beta.9"), a number
+  // before a word, a shorter list first; build metadata ("+…") ignored. A
+  // version that isn't x.y.z is never newer.
   const newer = (a, b) => {
-    const p = (v) => (v || "").split(/[.+-]/).slice(0, 3).map((x) => parseInt(x, 10) || 0);
+    const p = (v) => {
+      const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([^+]*))?(?:\+.*)?$/.exec(String(v || "").trim());
+      return m && { n: [+m[1], +m[2], +m[3]], pre: m[4] || "" };
+    };
     const [x, y] = [p(a), p(b)];
-    for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
-    return false;
+    if (!x || !y) return false;
+    for (let i = 0; i < 3; i++) if (x.n[i] !== y.n[i]) return x.n[i] > y.n[i];
+    if (x.pre === y.pre) return false;
+    if (!x.pre || !y.pre) return !x.pre;
+    const [s, u] = [x.pre.split("."), y.pre.split(".")];
+    for (let i = 0; i < s.length && i < u.length; i++) {
+      const [d, e] = [/^\d+$/.test(s[i]), /^\d+$/.test(u[i])];
+      if (d && e) { if (+s[i] !== +u[i]) return +s[i] > +u[i]; }
+      else if (d !== e) return e;
+      else if (s[i] !== u[i]) return s[i] > u[i];
+    }
+    return s.length > u.length;
   };
 
   function glyph(d, size = 14, stroke = 1.5) { return svg(d, size, stroke); }
-  // kindChip says what a plugin is: a provider signs in to a subscription
-  // and serves its models; middleware runs in the gateway on every agent's
-  // requests and replies, whatever serves them
-  function kindChip(mw) {
-    const c = el("span", "pm-chip kind " + (mw ? "mw" : "pv"));
-    c.append(glyph(mw ? PIPE : PLUG, 10, 1.5), el("span", "", mw ? t("Middleware") : t("Provider")));
-    c.title = mw ? t("Runs in magpie's gateway on the requests your agents send and on the replies") : t("Signs in to a subscription and serves its models");
+  // kindChip says what a plugin is: a provider ("pv") signs in to a
+  // subscription and serves its models; middleware ("mw") runs in the
+  // gateway on every agent's requests and replies, whatever serves them;
+  // an agent ("ag") is one magpie has no wiring of its own for, which it
+  // then connects as it does its own
+  const KINDS = {
+    pv: [PLUG, "Provider", "Signs in to a subscription and serves its models"],
+    mw: [PIPE, "Middleware", "Runs in magpie's gateway on the requests your agents send and on the replies"],
+    ag: [TERM, "Agent", "Adds an agent magpie has no setup of its own for: pick its model on the Agents page and it goes through magpie"],
+  };
+  const kindOf = (l) => l.kind === "middleware" ? "mw" : l.kind === "agent" ? "ag" : "pv";
+  function kindChip(kind) {
+    const [d, word, tip] = KINDS[kind];
+    const c = el("span", "pm-chip kind " + kind);
+    c.append(glyph(d, 10, 1.5), el("span", "", t(word)));
+    c.title = t(tip);
     return c;
   }
-  function logo(ic, big, mw) {
+  function logo(ic, big, kind) {
     const box = el("span", "pm-logo" + (big ? " big" : ""));
     if (ic) box.append(icon(ic));
-    else box.append(glyph(mw ? PIPE : PUZZLE, big ? 22 : 17, 1.4));
+    else box.append(glyph(kind === "mw" ? PIPE : kind === "ag" ? TERM : PUZZLE, big ? 22 : 17, 1.4));
     return box;
   }
 
@@ -115,7 +143,7 @@
   // spec (its npm name when its author published it there from the
   // repository, else github:owner/repo)
   const ghListing = (r) => ({
-    package: r.spec, name: r.repo.split("/")[1], kind: r.kind, github: r,
+    package: r.spec, name: r.repo.split("/")[1], kind: r.kind, github: r, icon: r.icon || undefined,
     summary: r.description ? { en: r.description } : undefined,
     npm: { version: r.version || "", publisher: r.owner, repository: r.url, license: r.license, weekly: 0 },
   });
@@ -391,10 +419,10 @@
     } else by.append(el("span", "", l.npm?.publisher || l.package));
     who.append(by);
     if (l.github) c.classList.add("gh");
-    top.append(logo(l.icon, false, l.kind === "middleware"), who, actionFor(l.package, l.name, l));
+    top.append(logo(l.icon || l.npm?.icon, false, kindOf(l)), who, actionFor(l.package, l.name, l));
     const sum = el("p", "pm-sum", summary(l));
     const meta = el("div", "pm-meta");
-    meta.append(kindChip(l.kind === "middleware"));
+    meta.append(kindChip(kindOf(l)));
     if (l.github) meta.append(unofficial(), stars(l.github.stars));
     if (l.npm?.weekly) {
       const d = el("span", "pm-dl");
@@ -432,7 +460,8 @@
 
   // a repository's author put it here, nobody reviewed it: said on its card
   function unofficial() {
-    const u = el("span", "pm-chip warn", t("Unofficial"));
+    const u = el("span", "pm-chip warn");
+    u.append(el("span", "dot"), el("span", "", t("Unofficial")));
     u.title = t("Tagged {topic} on GitHub by its author. Nobody at magpie has read it: read its code before you install it", { topic });
     return u;
   }
@@ -586,10 +615,12 @@
     if (!f) {
       body.append(intro());
       // magpie's community's alone: others' plugins are found by a search
-      const ours = ls.filter((l) => l.community && l.kind !== "middleware");
-      const mws = ls.filter((l) => l.community && l.kind === "middleware");
+      const ours = ls.filter((l) => l.community && kindOf(l) === "pv");
+      const mws = ls.filter((l) => l.community && kindOf(l) === "mw");
+      const ags = ls.filter((l) => l.community && kindOf(l) === "ag");
       if (ours.length) body.append(section(t("Subscriptions"), t("written for magpie, checked against its own sign-ins"), ours));
       if (mws.length) body.append(section(t("Gateway middleware"), t("runs in magpie's gateway on what every agent sends and gets back, whichever provider serves it"), mws));
+      if (ags.length) body.append(section(t("Agents"), t("agents magpie has no setup of its own for, connected to it as its own are"), ags));
       if (gh.length) body.append(section(t("Unofficial, on GitHub"), t("repositories their authors tagged {topic} — nobody has reviewed them; read the code before you install one", { topic }), gh));
       body.append(manual());
       return;
@@ -789,12 +820,20 @@
     // gateway middleware runs in magpie's gateway, not as a subscription:
     // the row says so, and how it is doing, on a line of its own
     const mw = e.middleware;
-    if (mw || e.isMiddleware) nm.append(kindChip(true));
-    if (e.providers?.length || !(e.middlewareOnly || (mw && !e.isMiddleware))) nm.append(kindChip(false));
+    const ag = e.agent;
+    if (mw || e.isMiddleware) nm.append(kindChip("mw"));
+    if (ag || e.isAgent) nm.append(kindChip("ag"));
+    if (e.providers?.length || !(e.middlewareOnly || e.inMagpieOnly || (mw && !e.isMiddleware) || (ag && !e.isAgent))) nm.append(kindChip("pv"));
     who.append(nm);
     const subs = subsOf(pkg);
     const sub = el("div", "sub");
     const cands = e.off ? [] : movableOf(pkg);
+    // a provider another installed plugin signs in to as well (neiko on
+    // Discord: a third-party plugin and their own one both name it). One
+    // of them serves it; the row says which, and the other gets a way to
+    // take it over, rather than the provider just going missing
+    const clashes = e.off || e.error ? [] : e.clashes || [];
+    const nameOfSpec = (spec) => { const o = (mine?.plugins || []).find((x) => x.spec === spec); return o ? shownName(o) : label(spec); };
     const ask = asking?.pkg === pkg && !busy.size && (asking.op === "move" ? cands.length : moved.length) ? asking.op : "";
     if (ask === "move") {
       sub.textContent = t("{names} can run on it again, with the same accounts.", { names: cands.map((c) => c.name).join(t(", ")) });
@@ -815,13 +854,17 @@
         else if (!x.signedIn && subs.some((y) => y.signedIn)) s.title = t("{name} is a subscription of its own; {other} works without it", { name: x.name, other: subs.find((y) => y.signedIn).name });
         sub.append(s);
       }
-    } else if (mw && !e.providers.length) {
-      // only middleware: its own line says what it does
+    } else if ((mw || ag) && !e.providers.length) {
+      // only middleware or an agent: its own line says what it does
+    } else if (clashes.length && !e.providers.length) {
+      // its own line below says whose it is
     } else sub.textContent = e.providers.length ? t("Signs in to {names}", { names: e.providers.join(t(", ")) }) : t("Signs in to nothing magpie can use");
     if (sub.textContent) who.append(sub);
+    if (!ask) for (const c of clashes) who.append(clashLine(e, c, nameOfSpec));
     if (mw && !e.off && !ask) who.append(mwLine(mw));
+    if (ag && !e.off && !ask) who.append(agentLine(ag));
     if (mw && !e.off && !ask && editing?.pkg === pkg) who.append(optionsEditor(e));
-    r.append(logo(l?.icon || subs[0]?.icon, false, e.middlewareOnly), who);
+    r.append(logo(l?.icon || l?.npm?.icon || subs[0]?.icon || ag?.icon, false, e.middlewareOnly ? "mw" : e.inMagpieOnly && e.isAgent && !e.isMiddleware ? "ag" : ""), who);
     const val = el("div", "val");
     const b = busy.get(pkg) || busy.get(e.spec);
     if (e.latest && e.version && newer(e.latest, e.version) && !e.off) {
@@ -847,6 +890,13 @@
       mv.disabled = busy.size > 0;
       mv.onclick = () => move(here);
       val.append(mv);
+    }
+    for (const c of ask ? [] : clashes.filter((c) => c.by !== e.spec)) {
+      const u = el("button", "text", b === "prefer" ? t("Switching…") : t("Use for {name}", { name: c.name }));
+      u.title = t("{name} runs on this plugin instead of {other}; both stay installed", { name: c.name, other: nameOfSpec(c.by) });
+      u.disabled = busy.size > 0;
+      u.onclick = () => act(pkg, "prefer", { spec: e.spec, provider: c.id }, () => status(t("{name} now runs on {plugin}", { name: c.name, plugin: shownName(e) }), "ok"));
+      val.append(u);
     }
     if (!e.off && !e.error && subs.some((x) => !x.signedIn)) {
       // signed in to one of its subscriptions already (Qoder, beside Qoder
@@ -958,6 +1008,34 @@
   // mwLine is a middleware's line in its plugin's row: its hooks, how many
   // calls and how long each took, and the calls that failed (which went on
   // as if it weren't there), or why it didn't load
+  // clashLine is one provider two installed plugins both sign in to, as
+  // the row of either says it: served here, or served by the other one
+  function clashLine(e, c, nameOfSpec) {
+    const d = el("div", "sub pm-clash" + (c.by === e.spec ? "" : " warn"));
+    const others = (c.by === e.spec ? c.with : [c.by]).map(nameOfSpec).join(t(", "));
+    d.append(el("span", "dot"), el("span", "", c.by === e.spec
+      ? t("{other} signs in to {name} too; this one serves it", { name: c.name, other: others })
+      : t("{name} is served by {other}, which signs in to it too", { name: c.name, other: others })));
+    d.title = c.by === e.spec
+      ? t("Two plugins sign in to {name}; magpie runs it on one. Use for {name} on the other one's row switches it", { name: c.name })
+      : t("Two plugins sign in to {name}; magpie runs it on one. Use for {name} switches it to this one, or remove the one you don't want", { name: c.name });
+    return d;
+  }
+
+  // agentLine is the agent a plugin adds, as the Agents page lists it, or
+  // why it isn't there
+  function agentLine(a) {
+    const d = el("div", "sub pm-mw");
+    if (a.error) {
+      d.textContent = t("Agent didn't load: {error}", { error: a.error });
+      d.classList.add("bad");
+      d.title = a.error;
+      return d;
+    }
+    d.textContent = d.title = t("Adds {name} to Agents", { name: a.name });
+    return d;
+  }
+
   function mwLine(m) {
     const d = el("div", "sub pm-mw");
     if (m.error) {
@@ -986,7 +1064,7 @@
     const local = isPath(l.package) || isGit(l.package);
     const ed = el("div", "editor pm-detail");
     const hd = el("div", "ehead pm-dhead");
-    hd.append(logo(l.icon, true, l.kind === "middleware"));
+    hd.append(logo(l.icon || l.npm?.icon, true, kindOf(l)));
     const who = el("div", "pm-who");
     const nm = el("div", "pm-name");
     nm.append(el("b", "", l.name));

@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/settings"
@@ -58,8 +59,11 @@ const (
 const EffortAuto = "auto"
 
 // Ruled reports whether the group decides anything as a user's turn
-// begins: a rule to put a member first, or the turn's effort.
-func (g Group) Ruled() bool { return len(g.Rules) > 0 || g.Effort == EffortAuto }
+// begins: a rule to put a member first, or the turn's effort. A pause
+// rule decides nothing then (PausedOut is looked at on every request).
+func (g Group) Ruled() bool {
+	return slices.ContainsFunc(g.Rules, func(r Rule) bool { return !r.Pause }) || g.Effort == EffortAuto
+}
 
 // Manual is a group's routing when the user picks which member it uses,
 // as CC Switch has one provider on at a time (#317): every request goes to
@@ -104,11 +108,32 @@ func (g Group) Live() Group {
 	return g
 }
 
-// Group is a routing group.
+// PatienceOff, PatienceDefault and PatienceLongest are a group's
+// Patience: none, the seconds a group waits that hasn't set it, and the
+// most it may.
+const (
+	PatienceOff     = -1
+	PatienceDefault = 60
+	PatienceLongest = 240
+)
+
+// Waits is how long a request to the group may be kept for its members to
+// come back (Patience), 0 for not at all.
+func (g Group) Waits() time.Duration {
+	switch {
+	case g.Patience < 0:
+		return 0
+	case g.Patience == 0:
+		return PatienceDefault * time.Second
+	}
+	return time.Duration(min(g.Patience, PatienceLongest)) * time.Second
+}
+
 // ContextSmallest is a group's Context when agents are told the window of
 // its smallest member.
 const ContextSmallest = -1
 
+// Group is a routing group.
 type Group struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
@@ -134,6 +159,14 @@ type Group struct {
 	// waits as long as it takes. The last one left is always waited for,
 	// and the slow one doesn't rest.
 	FirstToken int `json:"firstToken,omitempty"`
+	// Patience is how many seconds more a request may be kept, once every
+	// member has failed and nothing of a reply has been sent, for the
+	// members that failed in a way that passes —
+	// busy, overloaded, rate limited for a moment — to be asked again
+	// after a pause, in turn, until one answers (#1418). 0 is
+	// PatienceDefault; PatienceOff gives the agent the last one's error
+	// once each has been asked.
+	Patience int `json:"patience,omitempty"`
 	// Off are the members switched off: kept where they are in the
 	// order, with their rules, but sent nothing until switched on again,
 	// so trying a group without one doesn't mean taking it out.
@@ -242,10 +275,20 @@ func groupsIn(entries []Entry) []Group {
 	f := heldOf("file", load)
 	var out []Group
 	hidden := map[string]bool{}
+	var have map[string]bool // the providers magpie has, switched off or not
 	for _, g := range f.Groups {
 		if g.Hidden {
 			hidden[g.ID] = true
 			continue
+		}
+		if strings.HasPrefix(g.ID, "auto-") {
+			if have == nil {
+				have = map[string]bool{}
+				for _, p := range All() {
+					have[p.ID] = true
+				}
+			}
+			g = withoutRemoved(g, have)
 		}
 		out = append(out, withMatches(entries, g))
 	}
@@ -260,6 +303,40 @@ func groupsIn(entries []Entry) []Group {
 		out = append(out, g)
 	}
 	return orderedGroups(out, f.GroupOrder)
+}
+
+// withoutRemoved is a found group the user changed (an "auto-…" id kept
+// in providers.json) without the members of providers magpie no longer
+// has (have): a provider removed leaves the group as it leaves one magpie
+// finds, where they had stayed for the user to take out by hand (Discord).
+// It is how the group is read, not stored, so a provider back under its
+// id (an account shown again) is back in it. A member the user picked a
+// manual group's requests to, or a rule sends to, stays: taken out, the
+// group would send elsewhere unasked, or not save. So does every member
+// when none would be left. A provider switched off keeps its members: the
+// gateway skips them (membersIn) and they are sent to again once it is on.
+func withoutRemoved(g Group, have map[string]bool) Group {
+	gone := func(m string) bool {
+		if strings.HasPrefix(m, GroupPrefix) || IsPattern(m) {
+			return false
+		}
+		pid, _, ok := strings.Cut(m, "/")
+		if !ok || have[pid] || (g.Routing == Manual && m == g.Picked()) {
+			return false
+		}
+		return !slices.ContainsFunc(g.Rules, func(r Rule) bool { return r.Use == m })
+	}
+	if !slices.ContainsFunc(g.Members, gone) {
+		return g
+	}
+	kept := slices.DeleteFunc(slices.Clone(g.Members), gone)
+	if len(kept) == 0 && len(g.Match) == 0 {
+		return g
+	}
+	g.Members = kept
+	g.Off = slices.DeleteFunc(slices.Clone(g.Off), gone)
+	g.Fast = slices.DeleteFunc(slices.Clone(g.Fast), gone)
+	return g
 }
 
 // AutoGroupsOn reports whether magpie finds groups on its own: a model
@@ -798,6 +875,10 @@ func SaveGroup(g Group) error {
 		g.Name = g.ID
 	}
 	g.FirstToken = max(g.FirstToken, 0)
+	if g.Patience < 0 {
+		g.Patience = PatienceOff
+	}
+	g.Patience = min(g.Patience, PatienceLongest)
 	if g.Context < 0 {
 		g.Context = ContextSmallest
 	}
