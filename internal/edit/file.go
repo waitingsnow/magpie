@@ -7,10 +7,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/filememo"
@@ -21,6 +24,12 @@ import (
 // A file unchanged since it was last read is not read again (the Agents
 // page looks at each agent's files many times over), and what is returned
 // is the caller's own to change.
+//
+// A UTF-8 byte order mark at the start is not part of what is returned:
+// Windows tools (PowerShell's UTF8 encoding, Notepad, Claude Code channel
+// switchers) put one in front of an agent's settings.json or config.toml,
+// which the agent reads through while a JSON or TOML parser refuses it
+// (#1534). WriteAtomic puts it back, see keepBOM.
 func Read(path string) ([]byte, error) {
 	b, err := filememo.Read("bytes", path, func(b []byte) ([]byte, error) { return b, nil })
 	if errors.Is(err, fs.ErrNotExist) {
@@ -29,7 +38,54 @@ func Read(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return bytes.Clone(b), nil
+	return bytes.Clone(TrimBOM(b)), nil
+}
+
+// bom is the UTF-8 byte order mark.
+var bom = []byte("\xef\xbb\xbf")
+
+// TrimBOM is b without a UTF-8 byte order mark at its start, for a config
+// read some other way than Read.
+func TrimBOM(b []byte) []byte { return bytes.TrimPrefix(b, bom) }
+
+// keepBOM is data with the byte order mark the file at path starts with,
+// when it starts with one and data doesn't: the user's file keeps the
+// encoding it was saved in, for the tools that wrote it that way, and the
+// agent read it with the mark before.
+func keepBOM(path string, data []byte) []byte {
+	if len(data) == 0 || bytes.HasPrefix(data, bom) {
+		return data
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return data
+	}
+	defer f.Close()
+	head := make([]byte, len(bom))
+	if n, _ := io.ReadFull(f, head); n < len(bom) || !bytes.Equal(head, bom) {
+		return data
+	}
+	return append(append(make([]byte, 0, len(bom)+len(data)), bom...), data...)
+}
+
+// filter, while Filtered runs, is given each file WriteAtomic is about to
+// write and returns what is written in its place.
+var (
+	filter    atomic.Pointer[func(path string, data []byte) []byte]
+	filtering sync.Mutex
+)
+
+// Filtered runs fn with every file written through this package passed
+// through f first: f gets the path (a link's target) and the bytes about to
+// be written, and returns the bytes to write. Writes from elsewhere while
+// fn runs pass through f too, so f changes only what it is sure of. One
+// Filtered runs at a time.
+func Filtered(f func(path string, data []byte) []byte, fn func() error) error {
+	filtering.Lock()
+	defer filtering.Unlock()
+	filter.Store(&f)
+	defer filter.Store(nil)
+	return fn()
 }
 
 // WriteAtomic writes data to path via a temp file + rename so a crash can
@@ -44,6 +100,10 @@ func WriteAtomic(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	if f := filter.Load(); f != nil {
+		data = (*f)(path, data)
+	}
+	data = keepBOM(path, data)
 	if hardLinked(path) {
 		f, err := os.OpenFile(path, os.O_WRONLY, 0)
 		if err == nil {

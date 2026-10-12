@@ -22,6 +22,7 @@ import (
 
 	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/settings"
 	_ "modernc.org/sqlite"
@@ -482,11 +483,7 @@ func fileExists(p string) bool {
 }
 
 func claudeSettingsPath() string {
-	if dir := appdir.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		return filepath.Join(dir, "settings.json")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "settings.json")
+	return filepath.Join(appdir.ClaudeDir(), "settings.json")
 }
 
 // readClaudeSettings is the relay Claude Code was pointed at in its own
@@ -499,7 +496,7 @@ func readClaudeSettings(path string) ([]AppImport, error) {
 		return nil, err
 	}
 	var s map[string]any
-	if err := json.Unmarshal(jsonc.ToJSON(raw), &s); err != nil {
+	if err := json.Unmarshal(jsonc.ToJSON(edit.TrimBOM(raw)), &s); err != nil {
 		return nil, errors.New("Claude Code's settings.json: " + err.Error())
 	}
 	env := mapOf(s["env"])
@@ -569,7 +566,7 @@ func readCCSwitch(path string) ([]AppImport, error) {
 			return nil, err
 		}
 		var cfg map[string]json.RawMessage
-		if err := json.Unmarshal(jsonc.ToJSON(raw), &cfg); err != nil {
+		if err := json.Unmarshal(jsonc.ToJSON(edit.TrimBOM(raw)), &cfg); err != nil {
 			return nil, errors.New("CC Switch's config.json: " + err.Error())
 		}
 		for app, sec := range cfg {

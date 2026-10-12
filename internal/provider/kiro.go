@@ -43,6 +43,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/proc"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/steady"
 )
 
@@ -54,8 +55,8 @@ var KiroExecutable = func() string {
 		return p
 	}
 	home, _ := os.UserHomeDir()
-	for _, p := range []string{filepath.Join(home, ".local", "bin", "kiro-cli"),
-		"/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli", "/usr/local/bin/kiro-cli", "/opt/homebrew/bin/kiro-cli"} {
+	for _, p := range append([]string{filepath.Join(home, ".local", "bin", "kiro-cli")}, proc.SystemDirs(
+		"/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli", "/usr/local/bin/kiro-cli", "/opt/homebrew/bin/kiro-cli")...) {
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
 			return p
 		}
@@ -121,6 +122,9 @@ func (c kiroCred) fresh() bool {
 // (Builder ID, IAM Identity Center), or with a company's own identity
 // provider.
 func readKiroCLI() (kiroCred, bool) {
+	if settings.AccountDiscoveryOff() {
+		return kiroCred{}, false
+	}
 	path := kiroCLIDB()
 	if !fileExists(path) {
 		return kiroCred{}, false
@@ -178,6 +182,9 @@ func readKiroCLI() (kiroCred, bool) {
 
 // readKiroIDE reads the Kiro IDE's sign-in.
 func readKiroIDE() (kiroCred, bool) {
+	if settings.AccountDiscoveryOff() {
+		return kiroCred{}, false
+	}
 	path := filepath.Join(kiroIDEDir(), "kiro-auth-token.json")
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -236,6 +243,9 @@ func readKiro(key string) (kiroCred, bool) {
 func readKiroAt(key, home string) (kiroCred, bool) {
 	if key != "" {
 		return kiroCred{access: key, method: "apikey", region: "us-east-1"}, true
+	}
+	if settings.AccountDiscoveryOff() {
+		return kiroCred{}, false
 	}
 	if home != "" {
 		return readKiroFile(filepath.Join(home, kiroTokenFile))
