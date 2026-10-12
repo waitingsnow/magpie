@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -85,14 +86,15 @@ func (p Provider) KeyList() []KeyInfo {
 }
 
 // KeysOn is the keys in use, first to last: the first key, then every
-// saved one that's on.
+// saved one that's on. A key listed twice — providers.json's "keys"
+// naming the first key again, as #1772's did — is one key, asked once.
 func (p Provider) KeysOn() []KeyAccount {
 	if p.Key == "" {
 		return nil
 	}
 	out := []KeyAccount{p.first()}
 	for _, k := range p.Keys {
-		if !k.Off && k.Key != "" {
+		if !k.Off && k.Key != "" && !slices.ContainsFunc(out, func(o KeyAccount) bool { return o.Key == k.Key }) {
 			out = append(out, k)
 		}
 	}
@@ -106,9 +108,6 @@ func AddKey(id, name, key string, proto Protocol) error {
 	if err := keyProtocolOK(proto); err != nil {
 		return err
 	}
-	if key == "" {
-		return errors.New("paste the key to add")
-	}
 	p, err := Find(id)
 	if err != nil {
 		return err
@@ -116,10 +115,20 @@ func AddKey(id, name, key string, proto Protocol) error {
 	if p.Account != nil {
 		return errors.New("a signed-in account has no keys")
 	}
-	for _, k := range p.KeyList() {
-		if k.ID == keyID(key) {
-			return fmt.Errorf("%s already has this key", p.Name)
+	// nothing pasted: the key the provider is asked with when the user has
+	// none (OpenCode Zen's public, #1795); for any other, nothing to add
+	anon := false
+	if key == "" {
+		if key = p.AnonymousKey(); key == "" {
+			return errors.New("paste the key to add")
 		}
+		anon = true
+	}
+	if p.HasKey(key) {
+		if anon {
+			return fmt.Errorf("%s already has %s, the key its free models answer with none of yours", p.Name, key)
+		}
+		return fmt.Errorf("%s already has this key", p.Name)
 	}
 	if p.Key == "" {
 		p.Key, p.KeyName, p.KeyProtocol = key, name, proto
@@ -127,6 +136,28 @@ func AddKey(id, name, key string, proto Protocol) error {
 		p.Keys = append(p.Keys, KeyAccount{Name: name, Key: key, Protocol: proto})
 	}
 	return Save(*p)
+}
+
+// AnonymousKey is the key the provider is asked with when the user has
+// none of their own, "" when it has no such key: OpenCode Zen's public,
+// which its free models answer (normalize gives it to a Zen provider
+// saved with no key).
+func (p Provider) AnonymousKey() string {
+	if p.Preset == "opencode-zen" {
+		return OpenCodeAnonymousKey
+	}
+	return ""
+}
+
+// HasKey reports whether key is one of the provider's, on or off.
+func (p Provider) HasKey(key string) bool {
+	id := keyID(key)
+	for _, k := range p.KeyList() {
+		if k.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // SplitKeys is the keys in text pasted at once: one a line, or separated

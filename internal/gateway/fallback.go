@@ -314,6 +314,7 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 		cs, aside, left, barred := perKeyBarred(q, m, from)
 		pl.left = append(pl.left, barredOf(barred, q, fallback, from, nil)...)
 		pl.held = append(pl.held, creditsHeld(barred)...)
+		pl.capped = append(pl.capped, capHeldOnly(barred)...)
 		cs, wg := weigh(q, cs, m, from)
 		for i, c := range cs {
 			w := weighed(c, q, wg, fallback, from)
@@ -373,15 +374,16 @@ func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider
 func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.Protocol, pl *planned, asides *[]candidate, wAsides *[]Weighed) []candidate {
 	keys := func(m provider.Member) []candidate {
 		cs, aside, left, barred := perKeyBarred(m.Provider, m.Model, from)
-		pl.left = append(pl.left, barredOf(barred, m.Provider, false, from, m.Groups())...)
-		pl.held = append(pl.held, creditsHeld(barred)...)
 		// the effort the member is fixed at goes with each of its keys:
 		// the same model at another effort is another member's
-		for _, l := range [][]candidate{cs, aside, left} {
+		for _, l := range [][]candidate{cs, aside, left, barred} {
 			for i := range l {
 				l[i].effort, l[i].fast = m.Effort, m.Fast
 			}
 		}
+		pl.left = append(pl.left, barredOf(barred, m.Provider, false, from, m.Groups())...)
+		pl.held = append(pl.held, creditsHeld(barred)...)
+		pl.capped = append(pl.capped, capHeldOnly(barred)...)
 		*asides = append(*asides, aside...)
 		for _, w := range asideOf(aside, m.Provider, false, from) {
 			w.Via = m.Groups()
@@ -420,6 +422,7 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 				var sub planned
 				cs := planLevel(m.Via[depth], ms[i:j], depth+1, from, &sub, asides, wAsides)
 				pl.left = append(pl.left, sub.left...)
+				pl.capped = append(pl.capped, sub.capped...)
 				if len(cs) > 0 {
 					add(unit{cs: cs, order: sub.order}, firstAwake(cs))
 				}
@@ -619,6 +622,19 @@ func creditsHeld(cs []candidate) []candidate {
 	return out
 }
 
+// capHeldOnly are those of cs held at the usage cap the user set on them,
+// not for credits they won't spend: a conversation kept strictly on one
+// goes on there past the cap (provider.AffinityStrict, #1797).
+func capHeldOnly(cs []candidate) []candidate {
+	var out []candidate
+	for _, c := range cs {
+		if c.capped != nil && !c.capped.noCredits {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // barredOf is how the trace tells the accounts or keys the user set not
 // to serve the model: left out, as those not listing it are.
 func barredOf(cs []candidate, q provider.Provider, fallback bool, from provider.Protocol, via []string) []Weighed {
@@ -685,6 +701,52 @@ func restLast(out []candidate, pl planned) ([]candidate, planned) {
 	return append(ready, resting...), pl
 }
 
+// probeOne keeps, of the candidates resting after a failure, only the one
+// back soonest (the first in order on a tie), at its place; the ready ones
+// all stay (#1799). Before, every request asked each resting member in
+// turn once those ahead of it failed, so a member that was down was asked
+// by every request its rest was meant to spare it from, and in an outage
+// of the whole group each request went to all of them. Now a request asks
+// at most one resting member: the one whose rest is nearest its end,
+// whose answer tells whether it is back, as AxonHub's error-aware
+// balancing lets a failed channel's penalty decay rather than send it
+// every request. A lone candidate is always kept, so a request still gets
+// a real answer, and nothing about the request's own content or model
+// rests a member (only the model, by restID), so it isn't left out over
+// those. The trace keeps every member, the resting ones with their rest.
+func probeOne(cs []candidate) []candidate {
+	if len(cs) < 2 {
+		return cs
+	}
+	soonest := -1
+	var until time.Time
+	rests := 0
+	rest := make([]bool, len(cs))
+	for i, c := range cs {
+		r, ok := restOf(c.restKey())
+		if !ok && c.restID() != c.restKey() {
+			r, ok = restOf(c.restID())
+		}
+		if !ok {
+			continue
+		}
+		rests, rest[i] = rests+1, true
+		if soonest < 0 || r.Until.Before(until) {
+			soonest, until = i, r.Until
+		}
+	}
+	if rests < 2 {
+		return cs
+	}
+	out := make([]candidate, 0, len(cs)-rests+1)
+	for i, c := range cs {
+		if i == soonest || !rest[i] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // restingOf is why c rests, by its own key or else its provider's, while
 // it does. A key resting out of its own windows has them read again as it
 // is planned, behind the request and once a minute at most: an ordered
@@ -701,6 +763,51 @@ func restingOf(c candidate) (Rest, bool) {
 	return r, ok
 }
 
+// quotaHeld is, when every candidate of cs is a key resting out of its
+// allowance or its credit — refused with a 429 or a 402 for it, the
+// vendor's words kept — the rest of the first, and when the first of them
+// is back: asked before then, each would be refused the same (#1772). A
+// subscription account isn't held so: its resets may be spent for it
+// (autoReset), and its windows are read again as it is planned.
+func quotaHeld(cs []candidate) (Rest, time.Time, bool) {
+	var first Rest
+	var back time.Time
+	for i, c := range cs {
+		r, ok := restingOf(c)
+		if !ok || c.p.Account != nil || r.Why != failQuota && r.Why != failCredit || !quotaStatus(r.Status) || r.said == "" {
+			return Rest{}, time.Time{}, false
+		}
+		if i == 0 {
+			first = r
+		}
+		if back.IsZero() || r.Until.Before(back) {
+			back = r.Until
+		}
+	}
+	return first, back, len(cs) > 0
+}
+
+// quotaStatus is a status a vendor says a key is out of its allowance with.
+func quotaStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusPaymentRequired
+}
+
+// soonestBack is when the first of cs is back from its rest; false when
+// one of them isn't resting.
+func soonestBack(cs []candidate) (time.Time, bool) {
+	var back time.Time
+	for _, c := range cs {
+		r, ok := restingOf(c)
+		if !ok {
+			return time.Time{}, false
+		}
+		if back.IsZero() || r.Until.Before(back) {
+			back = r.Until
+		}
+	}
+	return back, !back.IsZero()
+}
+
 // spentAfter says whether every candidate in cs rests with its allowance
 // run out: none of them is likely to answer.
 func spentAfter(cs []candidate) bool {
@@ -714,6 +821,42 @@ func spentAfter(cs []candidate) bool {
 		}
 	}
 	return len(cs) > 0
+}
+
+// spentModel says whether every account or key routing would try for
+// p's model is out of its allowance as last known: held at its usage cap,
+// resting after the vendor said it is out of quota or credit (the
+// account's, or its model's own pool), or with a window that counts the
+// model used up. back is when the first of them is, zero when none says.
+// A model magpie picks for a call of its own (AutoVision, autoSearcher)
+// is one routing would still try: a turn's own model goes to the one
+// candidate it has all the same, but the describer or searcher picked in
+// its place can be another (#1801). Unknown allowance, or a rest for a
+// rate limit or an error, is not spent.
+func spentModel(p provider.Provider, model string, from provider.Protocol, now time.Time) (back time.Time, spent bool) {
+	out, aside, _, barred := perKeyBarred(p, model, from)
+	soonest := func(t time.Time) {
+		if !t.IsZero() && (back.IsZero() || t.Before(back)) {
+			back = t
+		}
+	}
+	for _, c := range barred {
+		if c.capped != nil {
+			soonest(c.capped.back)
+		}
+	}
+	for _, c := range append(out, aside...) {
+		if r, ok := restingOf(c); ok && (r.Why == failQuota || r.Why == failCredit) {
+			soonest(r.Until)
+			continue
+		}
+		if t := c.full(now); !t.IsZero() {
+			soonest(t)
+			continue
+		}
+		return time.Time{}, false
+	}
+	return back, true
 }
 
 var restingUntil = struct {
@@ -1986,6 +2129,38 @@ func refusedNote(reason string) string {
 	return "safety filter: " + reason
 }
 
+// refusedDetail is a refusal's note with what Anthropic's classifier said
+// of it in stop_details, when it said anything (#1768: which of cyber,
+// bio, frontier_llm… it was, for a user to tell one refusal from
+// another): its category as given, unknown ones too, and its
+// explanation, the vendor's own words, kept to a line. None is made up
+// when it gave none.
+func refusedDetail(reason string, details json.RawMessage) string {
+	var d struct {
+		Category    *string `json:"category"`
+		Explanation *string `json:"explanation"`
+	}
+	note := refusedNote(reason)
+	if len(details) == 0 || json.Unmarshal(details, &d) != nil {
+		return note
+	}
+	var said []string
+	if d.Category != nil && strings.TrimSpace(*d.Category) != "" {
+		said = append(said, "category "+strings.TrimSpace(*d.Category))
+	}
+	if d.Explanation != nil && strings.TrimSpace(*d.Explanation) != "" {
+		e := strings.Join(strings.Fields(*d.Explanation), " ")
+		if r := []rune(e); len(r) > 200 {
+			e = string(r[:200]) + "…"
+		}
+		said = append(said, e)
+	}
+	if len(said) == 0 {
+		return note
+	}
+	return note + " (" + strings.Join(said, ": ") + ")"
+}
+
 // streamPart is what one event of a reply carries of its content, in any
 // protocol, to tell a reply begun from its empty frame (#248).
 type streamPart struct {
@@ -2159,10 +2334,11 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 		return eventLead, 0, ""
 	case typ == "message_delta":
 		var d struct {
-			StopReason string `json:"stop_reason"`
+			StopReason  string          `json:"stop_reason"`
+			StopDetails json.RawMessage `json:"stop_details"`
 		}
 		if json.Unmarshal(v.Delta, &d) == nil && d.StopReason == "refusal" {
-			return refusal(d.StopReason)
+			return eventRefusal, refusedStatus, refusedDetail(d.StopReason, d.StopDetails)
 		}
 	case typ == "response.incomplete" || typ == "response.completed" && v.Response.Status == "incomplete":
 		if d := v.Response.IncompleteDetails; d != nil {
@@ -2393,8 +2569,9 @@ func refusedCode(data string) string {
 func refusedReply(b []byte) (string, bool) {
 	var v struct {
 		// Anthropic's
-		StopReason string       `json:"stop_reason"`
-		Content    []streamPart `json:"content"`
+		StopReason  string          `json:"stop_reason"`
+		StopDetails json.RawMessage `json:"stop_details"`
+		Content     []streamPart    `json:"content"`
 		// Chat's
 		Choices []struct {
 			FinishReason string `json:"finish_reason"`
@@ -2427,7 +2604,7 @@ func refusedReply(b []byte) (string, bool) {
 		return !slices.ContainsFunc(ps, streamPart.said)
 	}
 	if r, ok := filterReasons[v.StopReason]; ok && r == "refusal" && none(v.Content) {
-		return refusedNote(r), true
+		return refusedDetail(r, v.StopDetails), true
 	}
 	for _, c := range v.Choices {
 		if r, ok := filterReasons[c.FinishReason]; ok && (c.Message.Content == nil || c.Message.Content == "") && len(c.Message.ToolCalls) == 0 {

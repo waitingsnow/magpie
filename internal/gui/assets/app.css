@@ -116,6 +116,10 @@ body.panel { --panel-tint: color-mix(in srgb, var(--bg) 93%, transparent); backg
 /* on the Mac the panel's colour is painted under the page, where it keeps up
    with the panel as it grows (see tintPanel) */
 body.panel.tinted { background: transparent; }
+/* on Linux the panel is an opaque window, as the main window is, and its
+   page is opaque too: WebKitGTK repainting a scroll over the see-through
+   panel left the old position's paint showing through the new (#1803) */
+body.linux.panel { --panel-tint: var(--bg); }
 .tint-probe { display: none; background: var(--panel-tint); }
 /* on the frosted panel the surfaces are tints of the backdrop, not flat paint */
 @media (prefers-color-scheme: dark) {
@@ -325,8 +329,20 @@ body.side-drag, body.side-drag * { cursor: col-resize !important; user-select: n
 body.window.mac .side-top { height: calc(50px / var(--zoom, 1)); padding: calc(2px / var(--zoom, 1)) 0 0 calc(84px / var(--zoom, 1)); }
 /* Windows' title bar above already shows the icon and the name */
 body.window:not(.mac):not(.linux):not(.web) .side-top { height: 10px; }
-.side-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 10px 10px; scrollbar-width: thin; }
+.side-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 10px 10px; }
 .side-foot { flex: none; max-height: 55%; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; padding: 8px 10px 10px; border-top: .5px solid var(--line-2); }
+/* a short window's sidebar keeps no bar beside its pages: a thin one is laid
+   over them while they scroll and fades once they stop, as a Mac's overlay
+   scroll bar does (app.js sideBars), the same in WebKit, WebView2 and
+   WebKitGTK, whose own bars would take a gutter at rest */
+:is(.side-scroll, .side-foot) { scrollbar-width: none; }
+:is(.side-scroll, .side-foot)::-webkit-scrollbar { display: none; width: 0; height: 0; }
+.side-bar { position: absolute; right: 4px; width: 11px; z-index: 2; opacity: 0; pointer-events: none; transition: opacity .35s ease .1s; }
+.side-bar.on, .side-bar.drag { opacity: 1; pointer-events: auto; transition-duration: .1s; transition-delay: 0s; }
+.side-bar[hidden] { display: none; }
+.side-bar > i { position: absolute; right: 2px; top: 0; width: 6px; min-height: 24px; border-radius: 3px; background: var(--muted); opacity: .55; transition: width .15s ease, opacity .15s ease; touch-action: none; }
+.side-bar:hover > i, .side-bar.drag > i { width: 8px; opacity: .75; border-radius: 4px; }
+@media (prefers-reduced-motion: reduce) { .side-bar, .side-bar > i { transition: none; } }
 body.side-nav #nav { position: static; transform: none; display: flex; flex-direction: column; gap: 1px; padding: 0; border-radius: 0; }
 body.side-nav .nav-gl { display: block; padding: 14px 8px 4px; font-size: 11px; font-weight: 500; letter-spacing: .04em; color: var(--muted); }
 body.side-nav .nav-gl:first-child { padding-top: 2px; }
@@ -349,7 +365,10 @@ body.side-nav #nav button.has-dot::after { top: 50%; right: 10px; margin-top: -3
 .nav-sub { position: relative; display: flex; flex-direction: column; gap: 1px; margin: 2px 0 6px 16px; padding-left: 8px; }
 .nav-sub.moving { overflow: hidden; }
 .nav-sub::before { content: ""; position: absolute; left: 0; top: 3px; bottom: 3px; width: 1px; background: var(--line); }
-.nav-sub > button { position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; color: var(--ctl-fg); text-align: left; white-space: nowrap; transition: color .2s var(--ease); }
+/* rows keep their size while the list unrolls or folds: squeezed, a strip
+   drawn again then (Installed gets its count) marked the selection a third
+   of a row up, over Discover (#1787) */
+.nav-sub > button { position: relative; z-index: 1; flex: none; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; color: var(--ctl-fg); text-align: left; white-space: nowrap; transition: color .2s var(--ease); }
 .nav-sub > button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .nav-sub > button > em { margin-left: auto; font-style: normal; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 /* the selection (.nav-hl) is the only shape in the list: a row hovered or
@@ -444,11 +463,12 @@ body:not(.side-nav) .side-toggle .st-pane { opacity: 0; }
 @keyframes view-in { from { opacity: 0; transform: translateY(5px); } }
 @media (prefers-reduced-motion: reduce) { .view { animation-name: fade-in; } }
 body.window .view { padding: 2px 16px 8px; }
-/* a page of rows and settings keeps to a width the eye can follow across,
-   centred in a maximized window, rather than its name at one edge and its
-   switch at the other (#860); the tables and charts of Routing, Usage and
-   Sessions take the whole width */
-body.window :is(#view-agents, #view-providers, #view-gateway, #view-library, #view-plugins, #view-settings) { padding-left: max(16px, calc(50% - 600px)); padding-right: max(16px, calc(50% - 600px)); }
+/* every page keeps to a width the eye can follow across, centred in a
+   maximized window, rather than its name at one edge and its switch at the
+   other (#860); Routing, Usage and Sessions too, so a large screen doesn't
+   stretch them alone edge to edge while the others sit in the middle (面条 on
+   Discord): their tables and charts lay out by the room they get */
+body.window :is(#view-agents, #view-sessions, #view-providers, #view-routing, #view-gateway, #view-usage, #view-library, #view-plugins, #view-settings) { padding-left: max(16px, calc(50% - 600px)); padding-right: max(16px, calc(50% - 600px)); }
 /* a view takes focus (tabIndex -1) only so the keys scroll it after a click;
    a ring round the whole list there marks nothing a reader can act on (#1601) */
 .view:focus { outline: none; }
@@ -626,6 +646,17 @@ body.window .agent-fold-cap { padding: 10px 14px 3px; }
 .agent-fold-cap + .row { border-top: 0; }
 .agent-fold .agent-fold-cap { opacity: 0; transition: opacity .22s ease; }
 .agent-fold.open .agent-fold-cap { opacity: 1; transition: opacity .42s ease; transition-delay: calc(70ms + var(--i) * 48ms); }
+/* the ones hidden by hand, last, behind a disclosure of their own that is
+   shut until opened (a Finder sidebar section's): put away reads as put
+   away, not as pinned under the agents in use */
+.agent-hid-line { display: flex; align-items: center; gap: 4px; width: 100%; margin: 0; padding-bottom: 8px; border-left: 0; border-right: 0; border-bottom: 0; background: none; font-family: inherit; text-align: start; cursor: pointer; }
+.agent-hid-line:hover { color: var(--fg-2); }
+.agent-hid-line:focus-visible { outline: 1.5px solid var(--fg-2); outline-offset: -2px; }
+.agent-hid-line .chev { display: inline-flex; transform: rotate(-90deg); transition: transform .3s cubic-bezier(.22, 1, .36, 1); }
+.agent-hid-line[aria-expanded="true"] .chev { transform: none; }
+.agent-hid-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .42s cubic-bezier(.4, 0, .2, 1); }
+.agent-hid-fold.open { grid-template-rows: 1fr; transition-duration: .62s; transition-timing-function: cubic-bezier(.22, 1, .36, 1); }
+.agent-hid-inner { min-height: 0; overflow: hidden; }
 /* while a row is dragged the others slide out of its way */
 #agents.sorting { user-select: none; -webkit-user-select: none; }
 #agents.sorting > .row { transition: transform .22s cubic-bezier(.22, 1, .36, 1); }
@@ -794,6 +825,8 @@ body.window .field.solo { grid-column: auto; }
 .quota-track { height: 4px; border-radius: 2px; background: var(--pill); overflow: hidden; }
 .quota-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
 .subscription-error { font-size: 11px; color: var(--faint); }
+/* the way to the provider's settings, on a plan card that needs its access key (#1821) */
+.subscription-error .quota-fix { font: inherit; color: var(--accent); padding: 0; background: none; border: 0; cursor: pointer; }
 /* WorkBuddy's credits a day (#568): the period's sum over a bar a day; a
    day before counting began is an empty slot, not a zero */
 .credit-days { margin-top: 10px; }
@@ -1566,6 +1599,7 @@ body.panel .agent-more { justify-content: flex-start; gap: 6px; padding: 9px 14p
    them over the list, upward from it ------------------------------------------ */
 .prof-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: -7px; }
 .prof-btn em { font-style: normal; color: var(--faint); font-variant-numeric: tabular-nums; }
+.prof-btn em.cur { color: var(--fg); max-width: 14em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .prof-btn[aria-expanded="true"] { color: var(--fg); background: var(--pill-hover); }
 body.panel:not([data-ptab="agents"]) .prof-btn { display: none; }
 body.panel .foot .status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1752,6 +1786,8 @@ body.panel .foot { min-height: 0; padding: 5px 8px 7px 14px; border-top: 1px sol
   transition: border-color .12s, background .12s, color .12s;
 }
 .chip:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.chip .cur-tick { margin: 0 4px 0 -2px; font-size: 11px; font-weight: 600; color: var(--accent); flex: none; }
+.pd-cur { flex: none; font-size: 11.5px; color: var(--accent); }
 .chip .lib { width: 5px; height: 5px; margin: 0 2px 0 4px; border-radius: 50%; background: var(--accent); opacity: .7; flex: none; }
 .chip .x { width: 16px; height: 16px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; opacity: 0; transition: opacity .12s; }
 .chip:hover .x { opacity: .6; }
@@ -2938,8 +2974,8 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 #otelList .otel-stacked .segs { margin-left: 0; max-width: 100%; flex-wrap: wrap; }
 #otelList .otel-env { padding: 12px 14px; border-top: 1px solid var(--line-2); font-size: 11.5px; color: var(--muted); }
 
-.session-terminal-select { max-width: min(230px, 45%); height: 29px; color: var(--fg); }
-.session-terminal-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.session-terminal-select, .pref-pick { max-width: min(230px, 45%); height: 29px; color: var(--fg); }
+.session-terminal-select:focus-visible, .pref-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .row.pref .segs { flex: none; margin-left: auto; }
 .proxy-segs { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
 .proxy-segs input.proxy, input.words { width: 180px; min-width: 0; height: 27px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: 12.5px; outline: none; transition: border-color .12s, box-shadow .12s; }
@@ -3553,6 +3589,42 @@ body.window .row.agent > .ag-conn { margin-left: 12px; align-self: center; curso
 .ag-lead .ag-lead-h { display: block; font-size: 14px; margin-bottom: 4px; }
 .ag-lead p { margin: 0; line-height: 1.55; color: var(--muted); }
 .ag-lead .text.primary { margin-top: 12px; }
+/* Get started (wangye1644294 on X): a new user's steps, in the lead's
+   place, as a grouped list on a card, each step's number turning into a
+   tick as it is done; nothing striped, the tick is the state */
+.ag-lead.guiding { margin: 0 0 12px; }
+.guide { padding: 14px 16px 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.guide-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.guide-h { font-size: 14px; }
+.guide-n { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.guide-x { margin-left: auto; flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 11px; color: var(--muted); }
+.guide-x:hover { background: var(--pill); color: var(--fg); }
+.guide-x:focus-visible, .guide-agent:focus-visible { outline: 1.5px solid var(--accent); outline-offset: 1px; }
+.guide-steps { list-style: none; }
+.guide-step { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; }
+.guide-step + .guide-step { border-top: 1px solid var(--line-2); }
+.guide-tick { flex: none; display: grid; place-items: center; width: 20px; height: 20px; margin-top: 0; border-radius: 10px; border: 1.5px solid var(--faint); color: var(--muted); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.guide-step.done .guide-tick { border-color: var(--green); background: var(--green); color: var(--card); }
+.guide-body { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; line-height: 1.45; }
+.ag-lead .guide-title { font-weight: 550; }
+.guide-step.done .guide-title { color: var(--fg-2); }
+.guide-say { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.guide-step.optional:not(.done) .guide-title { color: var(--fg-2); }
+.ag-lead .guide .text.primary { margin-top: 5px; }
+.guide-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.guide-acts .text { margin-top: 5px; }
+.guide-agents { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px; }
+.guide-agent { display: inline-flex; align-items: center; gap: 6px; height: 26px; max-width: 100%; padding: 0 10px 0 7px; border: 1px solid var(--line); border-radius: 13px; background: var(--card); color: var(--fg); font-size: 12px; cursor: pointer; transition: background .12s, border-color .12s; }
+.guide-agent > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guide-agent .ic { width: 15px; height: 15px; flex: none; }
+.guide-agent:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+.guide-agent:disabled { cursor: default; color: var(--muted); }
+.guide-agent:disabled .ic { opacity: .55; }
+.guide-agent.busy { color: var(--fg); }
+.guide-more { color: var(--muted); font-size: 12px; }
+body.panel .guide { padding: 10px 12px 4px; border-radius: 10px; }
+body.panel .guide-step { gap: 10px; padding: 8px 0; }
+body.panel:not([data-ptab="agents"]) #agentsLead { display: none; }
 /* the first line keeps its place opened: a line of its own height, the
    row not centring what it holds; no gap between its lines, which the
    opened part couldn't fold away: it starts where the shut row ended */

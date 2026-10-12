@@ -33,6 +33,7 @@ let prefs = null; // the settings page: theme, lang, version, dir, gateway
 let providers = null; // { providers, presets, gateway }
 let view = "agents";
 let showAllAgents = false; // the agents no one has set anything on, folded away
+let showHiddenAgents = false; // under them, the ones hidden by hand: a fold of their own, shut until asked
 let period = "today"; // usage window
 let usage = null;   // last usage summary
 let usageHidOpen = false; // the Usage page's hidden agents shown under their line
@@ -544,20 +545,60 @@ function renderAgents() {
     const inner = el("div", "agent-fold-inner");
     inner.inert = !showAllAgents;
     fold.style.setProperty("--n", folded.length);
-    // the ones hidden by hand, then the ones nothing is set on, each under
-    // a line that says which they are
+    // the ones nothing is set on, then, last and least, the ones hidden by
+    // hand (0xZaTe on Discord: listed first, right under the agents in use,
+    // hidden read as pinned, 反而更显眼了). Under the others the hidden ones
+    // are a disclosure of their own, shut until it is opened, as a Finder
+    // sidebar section is; with nothing else folded, the fold is theirs.
     const byHand = folded.filter(isHidden), unset = folded.filter((a) => !isHidden(a));
+    if (!byHand.length) showHiddenAgents = false;
     let i = 0;
-    for (const [group, cap] of [[byHand, "Hidden"], [unset, "Not set up"]]) {
-      if (!group.length) continue;
-      const c = el("div", "agent-fold-cap", t(cap));
-      c.style.setProperty("--i", i);
-      inner.append(c);
+    const rows = (group, into) => {
       for (const a of group) {
         const row = agentRow(a, true);
         row.style.setProperty("--i", i++);
-        inner.append(row);
+        into.append(row);
       }
+    };
+    const cap = (text) => {
+      const c = el("div", "agent-fold-cap", text);
+      c.style.setProperty("--i", i);
+      inner.append(c);
+    };
+    if (unset.length) {
+      cap(t("Not set up"));
+      rows(unset, inner);
+    }
+    if (byHand.length && !unset.length) {
+      cap(t("Hidden"));
+      rows(byHand, inner);
+    } else if (byHand.length) {
+      const line = el("button", "agent-fold-cap agent-hid-line");
+      line.type = "button";
+      line.style.setProperty("--i", i);
+      line.title = t("Hidden by you · click to see them");
+      const hc = el("span", "chev");
+      hc.append(svg(CHEV, 9, 1.8));
+      line.append(el("span", "", t("Hidden ({n})", { n: byHand.length })), hc);
+      const hf = el("div", "agent-hid-fold" + (showHiddenAgents ? " open" : ""));
+      const hi = el("div", "agent-hid-inner");
+      hi.inert = !showHiddenAgents;
+      hf.id = "agentsHidden";
+      line.setAttribute("aria-controls", hf.id);
+      line.setAttribute("aria-expanded", String(showHiddenAgents));
+      rows(byHand, hi);
+      hf.append(hi);
+      hf.addEventListener("transitionend", (e) => { if (e.target === hf) fit(); });
+      line.onclick = (e) => {
+        showHiddenAgents = !showHiddenAgents;
+        const room = hi.scrollHeight;
+        fit(showHiddenAgents ? room : -room, showHiddenAgents ? UNROLL : ROLLUP);
+        hf.classList.toggle("open", showHiddenAgents);
+        hi.inert = !showHiddenAgents;
+        line.setAttribute("aria-expanded", String(showHiddenAgents));
+        if (showHiddenAgents) unrollInView(hf, line, e);
+      };
+      inner.append(line, hf);
     }
     fold.append(inner);
     const more = el("button", "agent-more");
@@ -570,8 +611,7 @@ function renderAgents() {
       // what is folded, and how many of them were hidden by hand
       label.textContent = showAllAgents ? t("Show less")
         : !unset.length ? t("{n} hidden agents", { n: byHand.length })
-        : byHand.length ? t("Show {n} more ({h} hidden)", { n: folded.length, h: byHand.length })
-        : t("Show {n} more", { n: folded.length });
+        : t("Show {n} more", { n: unset.length });
       more.setAttribute("aria-expanded", String(showAllAgents));
     };
     labelFor();
@@ -586,6 +626,9 @@ function renderAgents() {
     fold.addEventListener("transitionend", (e) => { if (e.target === fold) settled(); });
     more.onclick = (e) => {
       showAllAgents = !showAllAgents;
+      // a fold of hidden ones only is the hidden ones' disclosure: Show on
+      // one of them leaves the rest open under their own line
+      if (!unset.length) showHiddenAgents = showAllAgents;
       // the panel's edge moves with the scroll, on the same beat and curve
       const room = inner.scrollHeight;
       fit(showAllAgents ? room : -room, showAllAgents ? UNROLL : ROLLUP);
@@ -626,14 +669,28 @@ function renderProfiles() {
   $(".profiles > .chip-input")?.remove(); // a name field open goes with the list it was for
   $(".profiles").classList.remove("naming", "detailed");
   $("#save").textContent = t("＋ Save current");
-  $("#profN").textContent = state.profiles.length || "";
+  // the panel's button names the profile in use, as a pop-up button shows
+  // what is picked, else how many there are (superhtoooth on X: it read
+  // 方案 1, 方案 2, a count taken for the name the profile was saved under,
+  // and nothing said which one was in use)
+  const cur = state.profiles.find((p) => p.inUse);
+  const n = $("#profN");
+  n.textContent = cur ? cur.name : state.profiles.length || "";
+  n.classList.toggle("cur", !!cur);
+  n.title = cur ? t("In use") : "";
   if (!state.profiles.length) chips.append(el("span", "hint", t("none yet · save the setup to switch back in one click")));
   for (const p of state.profiles) {
     const c = el("button", "chip");
     c._profile = p.name;
     if (profilePending.has(p.name)) c.classList.add("pending");
     const lib = profileLibrary(p.library);
-    c.title = [p.summary, lib].filter(Boolean).join("\n");
+    c.title = [p.inUse && t("In use"), p.summary, lib].filter(Boolean).join("\n");
+    // the one the setup is now, ticked as a menu ticks the item in effect
+    if (p.inUse) {
+      c.classList.add("cur");
+      c.setAttribute("aria-current", "true");
+      c.append(el("span", "cur-tick", "✓"));
+    }
     c.append(el("span", "", p.name));
     if (lib) c.append(el("span", "lib"));
     // the setup as it is now, saved over this profile; it, and ×, on a
@@ -774,7 +831,9 @@ function profileDetail(p, footed) {
     closeProfileDetail();
     chip?.focus({ preventScroll: true });
   };
-  head.append(el("span", "pd-name", p.name), apply, close);
+  head.append(el("span", "pd-name", p.name));
+  if (p.inUse) head.append(el("span", "pd-cur", t("In use")));
+  head.append(apply, close);
   if (!footed) d.append(head);
   const groups = p.agents || [];
   if (!groups.length) d.append(el("div", "pd-none", t("No agent settings saved")));
@@ -1318,6 +1377,16 @@ function agentsLead(list) {
     list.before(lead);
   }
   lead.replaceChildren();
+  // a new user's first view: the Get started card in the welcome's place,
+  // in the panel as in the window
+  const g = guideShown();
+  lead.classList.toggle("guiding", !!g);
+  if (g) {
+    lead.hidden = false;
+    lead.classList.remove("welcome");
+    lead.append(guideCard(g));
+    return;
+  }
   const kinds = mode === "panel" ? [] : state.agents.map(connectKind);
   lead.hidden = !kinds.some((k) => k === "ok" || k === "empty");
   if (lead.hidden) return;
@@ -1338,9 +1407,227 @@ function agentsLead(list) {
   }
 }
 
+// ---------- Get started (wangye1644294 on X) ----------
+// A new user is shown three steps above the agents: add a model source,
+// connect an agent (those magpie found here listed, each connected in a
+// click), and, optionally, a routing group made of their own models in a
+// click (provider.Templates). Each step is ticked from what is so — the
+// models magpie serves (state.served), an agent wired, a group of the
+// user's own — never from having been seen. The card goes once the first
+// two are done, or when put away (settings.GuideHidden, saved on the
+// server so the panel and the window agree).
+
+// the templates offered as a starter, most harmless first: each behind
+// the other changes no model the agent asked for until one fails
+const GUIDE_TEMPLATES = ["steady", "thrifty", "smart"];
+const GUIDE_TEMPLATE_NAMES = { smart: "Hard to strong, easy to cheap", thrifty: "Cheap first", steady: "Never stuck" };
+const GUIDE_TEMPLATE_SAYS = {
+  smart: "A hard task goes to the strongest model, an easy one and compaction to a cheap one",
+  thrifty: "A cheap model first; the strongest for high reasoning, or when the cheap ones fail",
+  steady: "The strongest model of each provider, each behind the other: one down doesn't stop the agent",
+};
+const GUIDE_X = "M4.5 4.5l7 7M11.5 4.5l-7 7";
+const GUIDE_CHIPS = 6; // agents named on the card; the rest are in the list under it
+// guideGroups: /api/groups as the card last read it, and for which served
+// count, read again when the models change or a group is added
+let guideGroups = null, guideGroupsFor = null, guideGroupsBusy = false;
+let guideBusy = ""; // what the card is doing: "hide", "template", an agent's id
+
+// guideShown: the steps' state when the card is to be shown, else null
+function guideShown() {
+  if (gatewayMode || !state || state.settings?.guideHidden) return null;
+  const source = (state.served || 0) > 0 || anyMagpieModels();
+  const agent = state.agents.some((a) => a.wired);
+  if (source && agent) return null;
+  const own = guideGroups?.groups?.filter((x) => !x.auto) || [];
+  return { source, agent, routing: own.length > 0, own };
+}
+
+function guideStep(n, done, title, say) {
+  const li = el("li", "guide-step" + (done ? " done" : ""));
+  const tick = el("span", "guide-tick");
+  tick.setAttribute("aria-hidden", "true");
+  if (done) tick.append(svg(CHECK, 12, 2));
+  else tick.textContent = String(n);
+  const body = el("div", "guide-body");
+  const h = el("b", "guide-title", title);
+  body.append(h);
+  if (say) body.append(el("span", "guide-say", say));
+  li.append(tick, body);
+  li.setAttribute("aria-label", (done ? t("Done") + ": " : "") + title);
+  return { li, body };
+}
+
+function guideCard(g) {
+  const card = el("section", "guide");
+  card.setAttribute("aria-label", t("Get started"));
+  const head = el("div", "guide-head");
+  const steps = [g.source, g.agent];
+  head.append(el("b", "guide-h", t("Get started")), el("span", "guide-n", t("{n} of {m} done", { n: steps.filter(Boolean).length, m: steps.length })));
+  const x = el("button", "guide-x");
+  x.type = "button";
+  x.title = t("Hide Get started");
+  x.setAttribute("aria-label", x.title);
+  x.append(svg(GUIDE_X, 12, 1.6));
+  x.disabled = guideBusy === "hide";
+  x.onclick = (e) => { e.stopPropagation(); hideGuide(); };
+  head.append(x);
+  card.append(head);
+  const list = el("ol", "guide-steps");
+
+  // 1: a model source
+  const one = guideStep(1, g.source, t("Add a model source"),
+    g.source ? t("{n} models ready to use", { n: state.served || 0 }) : t("A subscription you already pay for, a provider, or an API key"));
+  one.li.dataset.step = "source";
+  if (!g.source) {
+    const add = el("button", "text primary guide-go", t("Add a provider"));
+    add.type = "button";
+    add.onclick = (e) => {
+      e.stopPropagation();
+      if (mode === "window") addProviderFromAgents();
+      else api("window/main?view=providers", {}).catch((err) => status(err.message, "err"));
+    };
+    one.body.append(add);
+  }
+  list.append(one.li);
+
+  // 2: an agent, those found here named, each connected in a click
+  const found = state.agents.filter((a) => connectKind(a) === "ok" || connectKind(a) === "empty");
+  const two = guideStep(2, g.agent, t("Connect an agent"),
+    g.agent ? "" : found.length ? t("magpie found these on this computer. Click one to connect it:") : t("Install Claude Code, Codex, Gemini CLI, OpenCode… and magpie will list them here."));
+  two.li.dataset.step = "agent";
+  if (!g.agent && found.length) {
+    const chips = el("div", "guide-agents");
+    for (const a of found.slice(0, GUIDE_CHIPS)) {
+      const b = el("button", "guide-agent");
+      b.type = "button";
+      b.dataset.id = a.id;
+      b.append(icon(a.icon), el("span", "", a.name));
+      const ready = connectKind(a) === "ok";
+      b.disabled = !ready || !!guideBusy;
+      b.classList.toggle("busy", guideBusy === a.id);
+      b.title = ready ? t("Switch on and {agent}'s model list gets magpie's models", { agent: a.name }) : t("Add a key or a subscription first; then there are models to connect");
+      b.onclick = (e) => { e.stopPropagation(); guideConnect(a); };
+      chips.append(b);
+    }
+    if (found.length > GUIDE_CHIPS) chips.append(el("span", "guide-more", t("+{n} more below", { n: found.length - GUIDE_CHIPS })));
+    two.body.append(chips);
+  }
+  list.append(two.li);
+
+  // 3, optional: a routing group of the user's own models
+  const three = guideStep(3, g.routing, t("Set up routing (optional)"),
+    g.routing ? g.own.map((x) => x.name || x.id).join(", ") : t("A routing group sends each request to the right model, and to the next one when a model fails"));
+  three.li.dataset.step = "routing";
+  three.li.classList.add("optional");
+  if (!g.routing && g.source) {
+    guideLoadGroups();
+    const acts = el("div", "guide-acts");
+    const tp = GUIDE_TEMPLATES.map((k) => guideGroups?.templates?.find((x) => x.kind === k && !x.need && x.group?.members?.length)).find(Boolean);
+    if (tp) {
+      const name = t(GUIDE_TEMPLATE_NAMES[tp.kind] || tp.group.name);
+      const add = el("button", "text primary guide-go guide-tpl", t("Add “{name}”", { name }));
+      add.type = "button";
+      add.dataset.kind = tp.kind;
+      add.title = t(GUIDE_TEMPLATE_SAYS[tp.kind] || "") + "\n" + tp.group.members.join(" → ");
+      add.disabled = !!guideBusy;
+      add.onclick = (e) => { e.stopPropagation(); guideTemplate(tp, name); };
+      acts.append(add);
+    }
+    const open = el("button", "text guide-open", t("Open Routing"));
+    open.type = "button";
+    open.onclick = (e) => {
+      e.stopPropagation();
+      if (mode === "window") show("routing");
+      else api("window/main?view=routing", {}).catch((err) => status(err.message, "err"));
+    };
+    acts.append(open);
+    three.body.append(acts);
+    if (tp) three.body.append(el("span", "guide-say guide-tpl-say", t(GUIDE_TEMPLATE_SAYS[tp.kind] || "")));
+  }
+  list.append(three.li);
+  card.append(list);
+  return card;
+}
+
+// guideLoadGroups reads the groups and templates for step 3, once for
+// each count of models served, and draws the card again with them
+function guideLoadGroups(again) {
+  const key = String(state.served || 0);
+  if (guideGroupsBusy || (!again && guideGroupsFor === key)) return;
+  guideGroupsBusy = true;
+  guideGroupsFor = key;
+  api("groups").then((gs) => { guideGroups = gs; }, () => { /* the step links to Routing still */ })
+    .finally(() => { guideGroupsBusy = false; if (view === "agents" || mode === "panel") guideRedraw(); });
+}
+
+// guideRedraw draws the lead again, and the panel to its height
+function guideRedraw() {
+  const list = $("#agents");
+  if (!list || !state) return;
+  agentsLead(list);
+  fit();
+}
+
+async function guideConnect(a) {
+  if (guideBusy) return;
+  guideBusy = a.id;
+  guideRedraw();
+  try {
+    state = await api("agents/connect/" + a.id, {});
+    guideBusy = "";
+    renderAgents();
+    const msg = connectedSaid(a, state.connected);
+    if (state.notice) status(withNotice(msg, state.notice), "warn", 9000);
+    else status(msg, "ok", 7000);
+  } catch (err) {
+    guideBusy = "";
+    guideRedraw();
+    status(t(err.message), "err");
+  }
+}
+
+async function guideTemplate(tp, name) {
+  if (guideBusy) return;
+  guideBusy = "template";
+  guideRedraw();
+  try {
+    guideGroups = await api("groups/template", { kind: tp.kind, name });
+    guideBusy = "";
+    status(t("Added {name}", { name }), "ok");
+    // the agents' pickers list the new group
+    state = await api("state");
+    renderAgents();
+  } catch (err) {
+    guideBusy = "";
+    guideRedraw();
+    status(t(err.message), "err");
+  }
+}
+
+async function hideGuide() {
+  if (guideBusy) return;
+  guideBusy = "hide";
+  guideRedraw();
+  try {
+    prefs = await writingPrefs(api("settings/guide", { hidden: true }));
+    state.settings = prefs;
+    guideBusy = "";
+    renderAgents();
+  } catch (err) {
+    guideBusy = "";
+    guideRedraw();
+    status(t(err.message), "err");
+  }
+}
+
 async function addProviderFromAgents() {
   if (!await show("providers")) return;
-  $("#addProvider")?.click();
+  // the list not read yet (the page's first opening): clicked before it is
+  // in, the button drew a list of nothing and threw; read, an empty list
+  // opens the sheet itself
+  if (!providers) { try { await loadProviders(); } catch { return; } }
+  if (!adding) $("#addProvider")?.click();
 }
 
 // desktopLongestLine: Claude Desktop lists a model of 1M or more twice, the
@@ -8361,7 +8648,7 @@ function baseAPIOf(p) {
 
 // draftOf is a saved provider as its editor's form holds it.
 function draftOf(p) {
-  return { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, gemini: p.gemini || "", catalog: p.catalog, decide: p.decide || "", key: "", api: baseAPIOf(p), chosen: pickedOf(p), extra: [], headers: headerRows(p.headers), extraBody: extraBodyText(p.extraBody), icon: p.icon || "", fallback: [...(p.fallback || [])], unlisted: !!p.unlisted, searches: !!p.searches, unredacted: !!p.unredacted, pinUpstream: !!p.pinUpstream, balanceURL: p.balanceURL || "", balancePath: p.balancePath || "", modelsURL: p.modelsURL || "", contexts: contextsText(p.contexts), outputs: contextsText(p.outputs), compacts: contextsText(p.compacts), keysUrl: p.keysUrl || "", ...proxyDraft(p), ...concurrencyDraft(p) };
+  return { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, gemini: p.gemini || "", catalog: p.catalog, decide: p.decide || "", key: "", api: baseAPIOf(p), chosen: pickedOf(p), none: !!p.noModels, extra: [], headers: headerRows(p.headers), extraBody: extraBodyText(p.extraBody), icon: p.icon || "", fallback: [...(p.fallback || [])], unlisted: !!p.unlisted, searches: !!p.searches, unredacted: !!p.unredacted, pinUpstream: !!p.pinUpstream, authHeader: p.authHeader || "", balanceURL: p.balanceURL || "", balancePath: p.balancePath || "", modelsURL: p.modelsURL || "", contexts: contextsText(p.contexts), outputs: contextsText(p.outputs), compacts: contextsText(p.compacts), keysUrl: p.keysUrl || "", ...proxyDraft(p), ...concurrencyDraft(p) };
 }
 
 // duplicateProvider opens the Add form on a copy of p (#268): its URLs,
@@ -8509,6 +8796,9 @@ function drawEditor(p, presetID) {
   // the Redaction row, shown while every address is on this computer or
   // the local network
   let showLocal = () => {};
+  // the Key header row, shown while the provider has a third-party
+  // Anthropic API, which is sent its key in both headers by default
+  let showAuth = () => {};
   if (custom) {
     name = input(draft.name, t("e.g. My Relay"));
     name.oninput = () => { draft.name = name.value; if (isNew) draft.id = slug(name.value); };
@@ -8554,6 +8844,7 @@ function drawEditor(p, presetID) {
       fillEndpoints();
       showSearch();
       showLocal();
+      showAuth();
     };
     queueMicrotask(() => slide(seg, "api"));
     url = input(draft[apiField[draft.api]], urlHint(draft.api), "url");
@@ -8561,7 +8852,7 @@ function drawEditor(p, presetID) {
     url.oninput = () => {
       draft[apiField[draft.api]] = url.value;
       if (carried) { draft[carried.from] = carried.value; carried = null; fillEndpoints(); }
-      showSearch(); showLocal();
+      showSearch(); showLocal(); showAuth();
     };
     const urlWrap = el("div", "stack");
     urlWrap.append(seg, url);
@@ -8660,7 +8951,7 @@ function drawEditor(p, presetID) {
       const priceRate = priceRateOfDraft();
       if (priceRate === undefined) return priceRateError(ed);
       if (priceTypedError(ed)) return;
-      saving(saveBtn, t("Saving…")); providerAction("save", { id: p.id, models: chosenIds(), unlisted: draft.unlisted, fallback: draft.fallback, contexts: cx.map, outputs: ox.map, compacts: cpx.map, proxy, accountProxies: own.map, maxConcurrency, ...queue, priceRate, modelPrefs: modelPrefsOfDraft(), pinUpstream: !!draft.pinUpstream, ...routingOfDraft(p) }, t("{name} saved", { name: p.name })); };
+      saving(saveBtn, t("Saving…")); providerAction("save", { id: p.id, models: chosenIds(), noModels: noneChosen(), unlisted: draft.unlisted, fallback: draft.fallback, contexts: cx.map, outputs: ox.map, compacts: cpx.map, proxy, accountProxies: own.map, maxConcurrency, ...queue, priceRate, modelPrefs: modelPrefsOfDraft(), pinUpstream: !!draft.pinUpstream, ...routingOfDraft(p) }, t("{name} saved", { name: p.name })); };
     bar.append(cancel, saveBtn);
     ed.append(bar);
     return ed;
@@ -8795,6 +9086,29 @@ function drawEditor(p, presetID) {
     const row = field(t("Web search"), stk, t("For a relay in front of Anthropic's or OpenAI's own API: Claude Code's WebSearch and Codex's web_search go to it as they were sent, not through magpie's search. magpie doesn't automatically search with it for other models, but you can name it as the searcher."));
     showSearch = () => { for (const e of row) e.style.display = searchable() ? "" : "none"; };
     showSearch();
+    ed.append(...row);
+  }
+
+  // which header the key goes in on a third-party Anthropic API: both by
+  // default, one alone for a service that refuses the two together (Aloha
+  // on Discord: "x-api-key 和 Authorization 不可以同时存在"), which magpie
+  // also learns from that refusal. Anthropic's, Bedrock's and Azure's own
+  // APIs take x-api-key alone already
+  const twoKeyHeaders = () => {
+    if (p?.account || vertex) return false;
+    if (p && !custom) return !!p.bothAuth;
+    const a = ((draft.anthropic ?? (isNew && pr ? pr.anthropic : "")) || "").trim();
+    if (!a) return false;
+    let host = "";
+    try { host = new URL(/^[a-z]+:\/\//i.test(a) ? a : "https://" + a).hostname.toLowerCase(); } catch { return true; }
+    return !host.endsWith("anthropic.com") && !/^bedrock-runtime\..*\.amazonaws\.com$/.test(host) && !host.endsWith(".azure.com");
+  };
+  if (!p?.account && !vertex) {
+    const seg = segs([["", t("Both")], ["x-api-key", "x-api-key"], ["bearer", "Authorization: Bearer"]], draft.authHeader || "", (v) => { draft.authHeader = v; });
+    seg.classList.add("auth-header");
+    const row = field(t("Key header"), seg, t("Which header the API key goes in on the Anthropic API. Most services take both; pick one for a service that refuses the two together. magpie also switches to one by itself when a service says so."));
+    showAuth = () => { for (const e of row) e.style.display = twoKeyHeaders() ? "" : "none"; };
+    showAuth();
     ed.append(...row);
   }
 
@@ -9025,7 +9339,7 @@ function drawEditor(p, presetID) {
       const add = (label, key, ph, hint) => {
         if (apiField[draft.api] === key) return;
         const i = input(draft[key], ph, "url");
-        i.oninput = () => { draft[key] = i.value; if (carried?.from === key) carried = null; showSearch(); showLocal(); };
+        i.oninput = () => { draft[key] = i.value; if (carried?.from === key) carried = null; showSearch(); showLocal(); showAuth(); };
         eps.append(...field(t(label), i, t(hint)));
       };
       add("OpenAI URL", "chat", "https://…/v1", "if the vendor also serves chat completions");
@@ -9122,9 +9436,10 @@ function drawEditor(p, presetID) {
       body.baseAPI = draft.api === "openai" ? "chat" : draft.api;
     }
     if (custom) { body.icon = draft.icon || "generic"; body.balanceURL = (draft.balanceURL || "").trim(); body.balancePath = (draft.balancePath || "").trim(); body.modelsURL = (draft.modelsURL || "").trim(); }
-    if (p) { body.fallback = draft.fallback; body.unlisted = draft.unlisted; body.modelPrefs = modelPrefsOfDraft(); Object.assign(body, routingOfDraft(p)); }
+    if (p) { body.fallback = draft.fallback; body.unlisted = draft.unlisted; body.noModels = noneChosen(); body.modelPrefs = modelPrefsOfDraft(); Object.assign(body, routingOfDraft(p)); }
     body.searches = !!draft.searches && searchable();
     body.pinUpstream = !!draft.pinUpstream;
+    if (twoKeyHeaders()) body.authHeader = draft.authHeader || "";
     body.unredacted = !!draft.unredacted && onLAN();
     const cx = parseContexts(draft.contexts || "");
     if (cx.error) return editorError(t("Context window: {v} is not a length like 128k or 1m", { v: cx.error }), "warn");
@@ -9269,7 +9584,7 @@ function outputField() {
   light();
   const wrap = el("div", "cxfield");
   wrap.append(ox, row);
-  return field(t("Max output"), wrap, t("The most a reply may hold, told to the agents as their max tokens; empty leaves it to the vendor and models.dev"));
+  return field(t("Max output"), wrap, t("The most a reply may hold, told to the agents as their max tokens and sent as max_tokens on Anthropic's API when the agent names none; empty leaves it to the vendor and models.dev"));
 }
 
 // compactField is the editor's Compact at (#876): where Codex and Claude
@@ -10031,6 +10346,15 @@ function chosenIds() {
   return [...draft.chosen, ...typed.filter((id) => !draft.chosen.includes(id))].filter((id, i, all) => all.indexOf(id) === i);
 }
 
+// noneChosen: Select none kept, with nothing picked (#1818): none of the
+// provider's models served, not to agents, not to routing groups, while its
+// balance and usage still show. Without it no picks is the vendor's list.
+const noneChosen = () => !!draft.none && !chosenIds().length;
+
+// servedIds: the models the provider serves as the editor has it: the
+// picks; none after Select none; else those the vendor's list serves
+const servedIds = (p) => draft.chosen.length ? draft.chosen : draft.none ? [] : p.models.filter((m) => m.on).map((m) => m.id);
+
 // modelsOpen: a provider editor's models let out to their full height
 // (#833), kept for the next editor opened. MCHIPS_MAX: the most the box is
 // tall held, as app.css's .mchips max-height: min(132px, 28vh) says
@@ -10152,8 +10476,11 @@ function renderModels(p) {
     let shown = 0, hidden = 0;
     // with none picked agents are served the vendor's list, up to 24 of
     // it: those are drawn as served, not as left out (#614: the one model
-    // unticked and saved was still "1 model" on the card)
-    const served = draft.chosen.length || decideOnly(p) || draft.unlisted ? new Set() : new Set(p.models.slice(0, 24).map((m) => m.id));
+    // unticked and saved was still "1 model" on the card). Kept for routing
+    // groups alone, those are what the groups use (#1818: drawn as none
+    // while the card and the auto groups had all 17); after Select none,
+    // none is served
+    const served = draft.chosen.length || decideOnly(p) || draft.none ? new Set() : new Set(p.models.slice(0, 24).map((m) => m.id));
     // a filter is a search: what it doesn't match is left out, picked or not
     for (const m of p.models) {
       const on = draft.chosen.includes(m.id);
@@ -10175,7 +10502,7 @@ function renderModels(p) {
       if (m.default) c.title = `${m.id} · ${m.default}`;
       else if (m.name && m.name !== m.id) c.title = m.id;
       if (free) c.title = (c.title || m.id) + " · " + t(m.free ? "free: it doesn't use the plan's credits" : "free: so its name says");
-      if (served.has(m.id)) c.title = (c.title || m.id) + "\n" + t("Agents see it: none are picked, so the vendor's list is used") + "\n" + t("Click to pick just this model");
+      if (served.has(m.id)) c.title = (c.title || m.id) + "\n" + t(draft.unlisted ? "Routing groups use it: none are picked, so the vendor's list is used" : "Agents see it: none are picked, so the vendor's list is used") + "\n" + t("Click to pick just this model");
       tested(c, m.id);
       menu(c, m.id);
       // a click picks the model, a served one too: with none picked it
@@ -10208,8 +10535,9 @@ function renderModels(p) {
     drawFold();
     drawWorkOn();
     why.textContent = decideOnly(p) ? t("Agents never see them: a routing group picks one as its classifier.")
-      : draft.unlisted ? t("Agents don't see them: only the routing groups they are in use them.")
-      : t(draft.chosen.length ? "Agents see the models picked." : "None picked: agents see the vendor's list, up to {n} (dashed). Click a model to pick just it. To show them none, tick Only through routing groups, or switch the provider off.", { n: 24 });
+      : !draft.chosen.length && draft.none ? t("None selected: no agent or routing group uses its models. Its balance and usage still show. Click a model to pick it.")
+      : draft.unlisted ? t(draft.chosen.length ? "Agents don't see them: only the routing groups they are in use them." : "Agents don't see them: the routing groups they are in use the vendor's list, up to {n} (dashed). Select none to use none of them.", { n: 24 })
+      : t(draft.chosen.length ? "Agents see the models picked." : "None picked: agents see the vendor's list, up to {n} (dashed). Click a model to pick just it, or Select none to use none of them while its balance and usage still show.", { n: 24 });
     drawLost();
   };
   // those of its models in no routing group, while it is kept for groups:
@@ -10218,7 +10546,7 @@ function renderModels(p) {
   // makes a group of itself at a click
   const drawLost = () => {
     lost.replaceChildren();
-    const ids = draft.chosen.length ? draft.chosen : p.models.filter((m) => m.on).map((m) => m.id);
+    const ids = servedIds(p);
     const none = decideOnly(p) || !draft.unlisted ? [] : ids.filter((id) => !p.groups?.[id]?.length && !decidesModel(p, id));
     lost.hidden = !none.length;
     if (!none.length) return;
@@ -10256,7 +10584,7 @@ function renderModels(p) {
     };
     head.append(el("b", "", t("Names & levels")), fold);
     names.append(head);
-    const ids = draft.chosen.length ? draft.chosen : p.models.filter((m) => m.on).map((m) => m.id);
+    const ids = servedIds(p);
     if (!ids.length) { names.append(el("span", "hint", t("Pick a model first."))); return; }
     const prefs = draft.modelPrefs = draft.modelPrefs || {};
     draft.onModelPrefs = drawNames;
@@ -10554,7 +10882,7 @@ function renderModels(p) {
   };
   const allOff = el("button", "text action", t("Select none"));
   allOff.title = t("Unpick every model");
-  allOff.onclick = () => { draft.chosen = []; draw(); };
+  allOff.onclick = () => { draft.chosen = []; draft.none = true; draw(); };
   bulk.append(allOn, allOff);
   // just the free ones (Discord: 是否可以支持只选择免费模型), offered only
   // when the list has both free and paid models: with none free it would
@@ -10578,7 +10906,7 @@ function renderModels(p) {
   const workOn = el("button", "text action works-only", t("Working only"));
   const failedPicks = () => {
     const got = modelTests[p.id] || {};
-    const ids = draft.chosen.length ? draft.chosen : p.models.filter((m) => m.on).map((m) => m.id);
+    const ids = servedIds(p);
     return [ids, ids.filter((id) => got[id] && !got[id].ok)];
   };
   workOn.onclick = () => {
@@ -10644,7 +10972,7 @@ function renderModels(p) {
   const testAll = el("button", "text action", t("Test models"));
   testAll.title = t("Send a tiny request to each model agents see, to find the ones that don't answer") + "\n" + t("Right-click a model to test just it");
   testAll.onclick = async () => {
-    const ids = (draft.chosen.length ? draft.chosen : p.models.filter((m) => m.on).map((m) => m.id)).filter((id) => p.decideTest || !decidesModel(p, id));
+    const ids = servedIds(p).filter((id) => p.decideTest || !decidesModel(p, id));
     if (!ids.length) { status(t("Pick a model first."), "err"); return; }
     testAll.classList.add("busy");
     const got = modelTests[p.id] = {};
@@ -10744,6 +11072,7 @@ const STAYS = [
   ["session", "Session", "A conversation stays with the account or key that answered it for the whole session, while it can answer."],
   ["turn", "Within a turn", "A conversation stays put within a turn, while the agent sends tool results back; when you speak again, routing decides afresh."],
   ["off", "Off", "Every request is routed afresh, whoever answered its conversation before."],
+  ["strict", "Strict", "A conversation stays with the account or key that answered it and never moves to another, even past its usage cap: when that one is rate limited or out of quota, the error goes to the agent. New conversations are routed as usual."],
 ];
 // what one rate limited while it still has quota does then (provider.Sink,
 // 01huadalang): keeps its place, back first once its rest ends, or goes to
@@ -11653,6 +11982,12 @@ function renderSigning(sub) {
         s.append(keys);
       }
       tt.append(s);
+    } else if (flow.callbackBlocked) {
+      // the port the page sends the browser back to couldn't be opened, so
+      // only the pasted address finishes this sign-in (#1782)
+      tt.append(el("span", "s port-blocked", flow.callbackBlocked === "reserved"
+        ? t("Windows keeps port {port}, where the sign-in comes back, for Hyper-V, WSL or Docker, so the page the browser ends on won't load. Copy its whole address and paste it here.", { port: flow.callbackPort })
+        : t("Another program has port {port}, where the sign-in comes back, so the page the browser ends on won't finish the sign-in. Copy its whole address and paste it here.", { port: flow.callbackPort })));
     } else if (!flow.pasteCode) tt.append(el("span", "s", t("If the page the browser ends on won't load (magpie runs on a server or in Docker), copy its whole address and paste it here.")));
     const form = el("form", "callback-form");
     const url = input(flow.callbackURL || "", what, flow.pasteKey ? "password" : "text");
@@ -11851,7 +12186,15 @@ function renderAccounts(a, p) {
   // a restart): marked lapsed, or its allowance read saying so. Whatever
   // else it is (in use, the agent's own), it keeps a way to sign in again
   // and its Remove, and the reason never stands in their place.
-  const signedOut = (l) => !!sub?.plugin && !unusable(l) && (!!l.lapsed || SIGN_IN_GONE.test(quota?.[l.user]?.error || ""));
+  // A built-in Copilot account whose GitHub token GitHub refused (echo_ts
+  // on Discord: a revoked token) is the same, marked lapsed by magpie, and
+  // signed in again in place. So is any other built-in account whose
+  // sign-in its vendor revoked (#1793: ChatGPT's 401 token_revoked) or
+  // refused to refresh: the gateway passes over it till then.
+  const signedOut = (l) => !unusable(l) && (sub?.plugin ? !!l.lapsed || SIGN_IN_GONE.test(quota?.[l.user]?.error || "") : (a.agent === "copilot" && !!l.lapsed) || SIGN_IN_GONE.test(l.lapsed || ""));
+  // a Copilot account on an enterprise's GHE.com is named login@host, and
+  // signs in again there
+  const againSite = (l) => !sub?.plugin && a.agent === "copilot" && String(l.user).includes("@") ? String(l.user).split("@").pop() : undefined;
   const several = ls.filter((l) => !unusable(l) && ((l.active && !l.paused) || l.on)).length > 1;
   // kept signed in to one of the user's choosing (#524), the first is the
   // first in use in the order, which Make first sets without a sign-in
@@ -11925,7 +12268,7 @@ function renderAccounts(a, p) {
       row.classList.add("signed-out");
       row.append(el("span", "using", t("Sign-in required")));
       const again = el("button", "text", t("Sign in again"));
-      again.onclick = () => startSignIn(a.agent, false, undefined, { user: l.user });
+      again.onclick = () => startSignIn(a.agent, false, againSite(l), { user: l.user });
       const forget = el("button", "text quiet", t("Remove"));
       forget.title = l.own ? forgetOwnTitle(a) : t("magpie forgets this account's sign-in; the account itself is untouched");
       forget.onclick = () => accountAction("login/forget", { agent: a.agent, user: l.user }, t("{user} removed", { user: l.user }));
@@ -12236,12 +12579,22 @@ const SIGN_IN_GONE = /sign-in has (expired|lapsed)|sign in again/i;
 
 function quotaError(err) {
   if (/sign-in has expired/.test(err)) return t("Signed out — add this account again to use it");
+  // a Copilot account GitHub refused the token of (copilot_lapsed.go), as
+  // its row says it, in English or already in the user's language
+  const copilotLapsed = "GitHub refused this Copilot sign-in; sign in again";
+  if (err === copilotLapsed || err === t(copilotLapsed)) return t(copilotLapsed);
+  // an account whose sign-in its vendor revoked (signin_revoked.go, #1793)
+  if (/'s sign-in was revoked; sign in again$/.test(err)) return t("The vendor revoked this sign-in; sign in again");
   if (/no longer supported for Gemini Code Assist for individuals/.test(err)) return t("Google no longer serves personal accounts to Gemini CLI — hover for more");
   if (/magpie accounts project/.test(err)) return t("Needs a Google Cloud project — hover for how");
   if (/^Antigravity (hasn't set|won't serve)/.test(err)) return t("Antigravity hasn't set this account up — hover for why");
   if (/violation of Terms of Service/i.test(err)) return t("Google has suspended this account — hover for details");
   if (/access token is invalid or expired|didn't take the access token/.test(err)) return t("AiHubMix didn't take the access token — paste a new one in the provider's settings");
   if (/this key has no limit/.test(err)) return t("This key has no limit — add the account's access token in the provider's settings to see its balance");
+  // a Volcengine or Tencent plan whose provider has no access key to read
+  // it with (accessKeyCard, #1821): the card used to be left out unsaid
+  if (/^this plan's usage is read with the account's access key: give its SecretId/.test(err)) return t("This plan's usage needs the account's SecretId and SecretKey — give them in the provider's settings");
+  if (/^this plan's usage is read with the account's access key/.test(err)) return t("This plan's usage needs the account's AccessKey ID and Secret — give them in the provider's settings");
   // ZCode with no GLM Coding Plan and no Start Plan left: the account has
   // nothing to spend, which is not a reading that failed (#1001). Both the
   // built-in (zcodeStartQuota, internal/provider/zcode_start.go) and the
@@ -13198,7 +13551,10 @@ function renderKeyAccounts(p) {
     // the key is what's needed; a name is only for telling keys apart
     const name = input(addingKey.name, t("Name (optional), e.g. Team"));
     name.oninput = () => { addingKey.name = name.value; };
-    const key = input(addingKey.key, t("paste an API key"), "password");
+    // a provider asked with a key of its own when the user has none (Zen's
+    // public, #1795) adds that one when nothing is pasted, and says so
+    const key = input(addingKey.key, p.anonKey ? t("paste an API key, or leave empty for {key}: free models only", { key: p.anonKey }) : t("paste an API key"), "password");
+    if (p.anonKey) key.title = key.placeholder;
     key.oninput = () => { addingKey.key = key.value; };
     // several keys pasted into the one field: the box takes them all
     key.onpaste = (e) => {
@@ -13211,7 +13567,7 @@ function renderKeyAccounts(p) {
     const add = el("button", "text primary", t("Add"));
     const go = async () => {
       add.classList.add("busy");
-      const id = await keyFingerprint(key.value.trim());
+      const id = await keyFingerprint(key.value.trim() || p.anonKey || "");
       if (await accountAction("keys/add", { id: p.id, name: name.value, key: key.value, protocol: addingKey.protocol || "" }, t("Key added — it takes over when the ones before it run out"))) {
         addingKey = null; justAdded = id; renderProviders(); setTimeout(() => { justAdded = ""; }, 2000);
       }
@@ -16384,6 +16740,14 @@ function quotaWindows(sub) {
     e.title = sub.error;
     // read again from here too: a failed reading is the one most wanted
     e.prepend(quotaRefresh(sub));
+    // a plan that needs the access key the provider hasn't: the way to
+    // give it, one click away (#1821)
+    if (sub.needsAccessKey && sub.provider) {
+      const go = el("button", "quota-fix", t("Open settings"));
+      go.type = "button";
+      go.onclick = (ev) => { ev.stopPropagation(); openProvider(sub.provider); };
+      e.append(" ", go);
+    }
     return e;
   };
   if (sub.balance && !sub.windows?.length) {
@@ -19545,7 +19909,7 @@ $("#sessQ").onkeydown = (e) => { if (e.key === "Escape" && e.target.value) { e.s
 
 const THEMES = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
 const LOCALES = [["system", "System"], ["en", "English"], ["zh", "简体中文"], ["zh-TW", "繁體中文"], ["ja", "日本語"], ["de", "Deutsch"]];
-const TRAYS = [["panel", "Quick panel"], ["window", "Main window"]];
+const TRAYS = [["panel", "Open the quick panel"], ["window", "Open the main window"]];
 const CURRENCIES = [["usd", "$ USD"], ["cny", "¥ CNY"]];
 // The text size is the windows' own zoom, as a browser's Ctrl/Cmd +: the
 // page is laid out again in larger CSS pixels, so everything it measures is
@@ -19668,7 +20032,9 @@ function renderFonts(s) {
     const missing = chosen && !window.desktopFonts.available(chosen);
     const note = row.querySelector(".font-note");
     note.textContent = fontListError ? t("Couldn't read installed fonts") : fontFlight ? t("Loading…")
-      : missing ? t("Font unavailable; using system default") : fontList?.length === 0 ? t("No installed fonts found") : t("Saved only on this computer");
+      : missing ? t("Font unavailable; using system default") : fontList?.length === 0 ? t("No installed fonts found") : "";
+    // a line only when something is wrong or still coming (1ooogle on X)
+    note.hidden = !note.textContent;
     note.classList.toggle("err", fontListError || !!missing);
     const pill = row.querySelector(".font-family"), style = row.querySelector(".font-style");
     const paint = (button, text, name) => {
@@ -20120,11 +20486,12 @@ function renderSettings() {
   prefsBase = keep;
   renderFonts(s);
   $("#themeSegs").replaceChildren(segs(THEMES.map(([id, name]) => [id, t(name)]), s.theme, (theme) => savePrefs({ ...keep, theme })));
-  $("#langSegs").replaceChildren(segs(LOCALES.map(([id, name]) => [id, t(name)]), s.lang, (lang) => savePrefs({ ...keep, lang })));
+  renderLangPick(s, keep);
   renderGatewayMode(s);
   // a browser tab has its own zoom, and magpie leaves it to it
   $("#textSizeRow").hidden = web;
-  $("#textSizeSub").textContent = t("Everything in magpie's windows, larger; {keys} too", { keys: textSizeKeys() });
+  // the keys that do it too, kept in the choices' tooltip, the row saying no more than its name
+  $("#textSizeSegs").title = t("Everything in magpie's windows, larger; {keys} too", { keys: textSizeKeys() });
   $("#textSizeSegs").replaceChildren(segs(TEXT_SIZES.map((n) => [n, n + "%"]), s.textSize || 100, (n) => setTextSize(n)));
   $("#traySegs").replaceChildren(segs(TRAYS.map(([id, name]) => [id, t(name)]), s.tray || "panel", (tray) => savePrefs({ ...keep, tray })));
   // the Dock is the Mac's; the tray and the login item the app's
@@ -20143,8 +20510,8 @@ function renderSettings() {
   // its line says what the choice does; data-en keeps a language change on it
   const awakeSub = $("#keepAwakeRow .sub");
   awakeSub.dataset.en = s.keepAwake && s.keepAwakeDisplay
-    ? "Keeps this computer from going to sleep and its display on while agents work through magpie and for ten minutes after"
-    : "Keeps this computer from going to sleep by itself while agents work through magpie and for ten minutes after; the display may still turn off";
+    ? "Keeps this computer and its screen awake while magpie runs tasks"
+    : "Keeps this computer awake while magpie runs tasks";
   awakeSub.textContent = t(awakeSub.dataset.en);
   // WSL's distros, looked in on Windows unless turned off (#1264)
   $("#wslAgentsRow").hidden = !s.wsl;
@@ -20221,6 +20588,7 @@ function renderSettings() {
   renderOTel(s, keep);
   renderPort(s);
   renderLAN(s);
+  renderAllow(s);
   renderCORS(s);
   renderSync();
 
@@ -20316,6 +20684,25 @@ function renderGatewayMode(s) {
     "no-agents": t("Now on: no agents on this computer"),
   }[s.gatewayWhy] || t("Now off: agents found on this computer");
   $("#gatewayModeSub").textContent = [t("Only what a gateway for other computers needs: no Agents or Library, nor this computer's agents' settings"), now].filter(Boolean).join(" · ");
+}
+
+// renderLangPick: Settings' language, one menu button showing the language
+// picked (1ooogle on X), the app's own menu rather than six segments.
+function renderLangPick(s, keep) {
+  const b = $("#langPick");
+  const chosen = LOCALES.some(([id]) => id === s.lang) ? s.lang : "system";
+  const name = (id) => { const n = LOCALES.find((l) => l[0] === id)[1]; return id === "system" ? t(n) : n; };
+  b.dataset.value = chosen;
+  b.setAttribute("aria-label", t("Language"));
+  b.replaceChildren(el("span", "", name(chosen)), svg(CHEV, 11, 1.6));
+  b.onclick = (e) => {
+    e.stopPropagation();
+    if (b.classList.contains("open")) return closeProtoMenu();
+    openProtoMenu(b, LOCALES.map(([id]) => ({ v: id, name: name(id), note: "", literalName: true })), chosen, (v) => {
+      if (v === chosen) return;
+      savePrefs({ ...keep, lang: v });
+    }, "Language", "sess-menu", "right");
+  };
 }
 
 function renderSessionTerminal(s, keep) {
@@ -21214,9 +21601,6 @@ function renderCodexTitles(s) {
     return m ? `${m.name || m.id} · ${m.providerName}` : id;
   };
   const v = s.codexTitles || "";
-  $("#codexTitlesSub").textContent = v === "off" ? t("Codex’s title requests are answered by magpie with no title and sent nowhere; new threads stay unnamed")
-    : v ? t("Codex’s title requests go to this model, not to its ChatGPT sign-in; the Usage and Routing views still show them as titles")
-    : t("Codex asks its own model for each thread’s title through its ChatGPT sign-in, even while the conversation is on magpie’s models");
   const b = el("button", "rt-cond on");
   b.type = "button";
   b.setAttribute("aria-label", t("Codex thread titles"));
@@ -21243,8 +21627,6 @@ function renderCodexAutoReview(s) {
   const models = s.titleModels || [];
   const v = s.codexAutoReview || "";
   const m = models.find((x) => x.id === v);
-  $("#codexAutoReviewSub").textContent = v ? t("Codex’s auto-review decides approvals on this model, whatever model the conversation is on")
-    : t("Codex’s auto-review decides approvals on codex-auto-review when it has it, else on the conversation’s model at low effort");
   const b = el("button", "rt-cond on");
   b.type = "button";
   b.setAttribute("aria-label", t("Codex auto-review model"));
@@ -21275,8 +21657,6 @@ function renderCodexMemories() {
   row.hidden = gatewayMode || !f || (!f.options.length && !f.value);
   if (row.hidden) return;
   const opt = optionFor(f, f.value);
-  $("#codexMemoriesSub").textContent = f.value ? t("Codex sums threads up and folds them into its memories with this model, whatever model the conversation is on")
-    : t("Codex sums threads up and folds them into its memories with its own models, gpt-5.6-luna and gpt-5.6-terra, whatever model the conversation is on");
   const b = el("button", "rt-cond on");
   b.type = "button";
   b.setAttribute("aria-label", t("Codex memories model"));
@@ -21658,14 +22038,30 @@ function renderDiscovery(s) {
       : t("Read the accounts your agents are signed in to (Claude Code, Codex, Copilot, Cursor and others: their files and the Keychain) and serve them. Off, magpie reads none of them; API-key providers work as before")));
   const val = el("div", "val");
   const on = !s.noAccountDiscovery && !s.noAccountsEnv;
-  val.append(segs([["off", t("Off")], ["on", t("On")]], on ? "on" : "off", (v) => {
+  val.append(segs([["off", t("Off")], ["on", t("On")]], on ? "on" : "off", async (v) => {
     if ((v === "on") === on) return;
+    // Off takes every subscription out of magpie at once, and a click that
+    // didn't mean that left a user with none working and no word why
+    // (#1761): it asks first, naming the subscriptions that stop
+    if (v === "off" && !(await confirmAction(t("Turn off subscription accounts?"), await discoveryOffWarning(), t("Turn them off")))) {
+      renderSettings();
+      return;
+    }
     writingPrefs(api("settings/account-discovery", { off: v === "off" }))
       .then((ns) => { prefs = state.settings = ns; renderSettings(); refreshAfterSync(); })
       .catch((e) => { status(t(e.message), "err"); renderSettings(); });
   }));
   r.append(who, val);
   box.replaceChildren(r);
+}
+// what turning discovery off stops: the subscriptions signed in now, by
+// name, the Providers list read for it when no page has yet
+async function discoveryOffWarning() {
+  const list = providers || await api("providers").catch(() => null);
+  const subs = (list?.providers || []).filter((p) => p.account && !p.off).map((p) => p.name);
+  return subs.length
+    ? t("{names} stop working in magpie until this is on again: magpie reads none of the sign-ins they come from. API-key providers work as before.", { names: subs.join(", ") })
+    : t("Every subscription stops working in magpie until this is on again: magpie reads none of the sign-ins they come from. API-key providers work as before.");
 }
 
 // renderRedact: what the gateway masks before a request goes to a vendor —
@@ -22024,6 +22420,69 @@ function renderCORS(s) {
     x.onclick = () => set(origins.filter((v) => v !== o));
     const v = el("div", "val");
     v.append(x);
+    row.append(w, v);
+    box.append(row);
+  }
+}
+
+// renderAllow: the addresses other computers may reach magpie from at
+// all (lc on Discord: magpie in Docker on a public host), as IPs and CIDR
+// ranges, under Share on local network — a row to add one, and one row
+// each to take it away. None listed lets every address in, with a gateway
+// key, as before; this computer is always let in. MAGPIE_ALLOW_IPS, where
+// set, is the list, shown and not edited here.
+let allowDraft = { value: "", err: "" };
+function allowSays(m) {
+  if (/is not an IP address/.test(m)) return t("Write an address as 203.0.113.7, or a range as 10.0.0.0/8 or 2001:db8::/32");
+  if (/shut out/.test(m)) return t("That list leaves out the address this page is open from: add it first, or this page can’t reach magpie");
+  if (/MAGPIE_ALLOW_IPS/.test(m)) return t("MAGPIE_ALLOW_IPS sets this list; change it there");
+  return t(m);
+}
+function renderAllow(s) {
+  const box = $("#allowList");
+  box.replaceChildren();
+  const env = s.allowIPsEnv || "";
+  if (!s.lan && !s.onNetwork && !env) return;
+  const list = env ? (s.allowIPsFromEnv || []) : (s.allowIPs || []);
+  const d = allowDraft;
+  const set = (next, done) => writingPrefs(api("settings/allowips", { ips: next }))
+    .then((ns) => { prefs = ns; d.err = ""; done?.(); renderSettings(); status(t("Saved"), "ok", 1500); })
+    .catch((e) => { d.err = allowSays(e.message); status(d.err, "err"); renderSettings(); });
+  const r = el("div", "row pref rule-row");
+  const who = el("div", "who");
+  const sub = d.err || (env ? t("Set by MAGPIE_ALLOW_IPS. Other computers reach magpie only from these addresses, even with a gateway key; this computer always can")
+    : t("Other computers reach magpie only from these addresses or ranges (CIDR), even with a gateway key; this computer always can. None listed lets every address in"));
+  who.append(el("div", "name", t("Allowed addresses")), el("div", "sub" + (d.err ? " err" : ""), sub));
+  r.append(who);
+  if (!env) {
+    const field = input(d.value, "203.0.113.7, 10.0.0.0/8");
+    field.className = "words rule-match allow-ip";
+    field.setAttribute("aria-label", t("IP address or range"));
+    field.autocomplete = "off";
+    field.spellcheck = false;
+    const add = el("button", "text", t("Add"));
+    add.onclick = () => {
+      d.value = field.value.trim();
+      if (!d.value) return field.focus();
+      set([...list, ...d.value.split(/[\s,;]+/).filter(Boolean)], () => { allowDraft = { value: "", err: "" }; });
+    };
+    field.oninput = () => { d.value = field.value; };
+    field.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") add.onclick(); };
+    const val = el("div", "val rule-add");
+    val.append(field, add);
+    r.append(val);
+  }
+  box.append(r);
+  for (const a of list) {
+    const row = el("div", "row pref allow-ip-row");
+    const w = el("div", "who");
+    w.append(el("div", "name", a));
+    const v = el("div", "val");
+    if (!env) {
+      const x = el("button", "text", t("Remove"));
+      x.onclick = () => set(list.filter((o) => o !== a));
+      v.append(x);
+    }
     row.append(w, v);
     box.append(row);
   }
@@ -23075,6 +23534,71 @@ function sideDrag(edge) {
   });
   addEventListener("resize", () => { if (sideW) sideWidth(); });
 }
+// a box of the sidebar that runs longer than the window has no bar of its
+// own (app.css .side-bar): a thin one is laid over its edge while it
+// scrolls and fades once it stops, as a Mac's overlay bar does; held under
+// the pointer it stays, and dragged it scrolls the box
+function sideBars() {
+  const side = $("#side");
+  if (!side) return;
+  for (const box of side.querySelectorAll(".side-scroll, .side-foot")) {
+    const bar = document.createElement("div");
+    bar.className = "side-bar";
+    bar.setAttribute("aria-hidden", "true");
+    bar.hidden = true;
+    const thumb = document.createElement("i");
+    bar.append(thumb);
+    side.append(bar);
+    let fade = 0;
+    const place = () => {
+      const ch = box.clientHeight, sh = box.scrollHeight;
+      bar.hidden = !ch || sh <= ch + 1;
+      if (bar.hidden) return;
+      bar.style.top = box.offsetTop + "px";
+      bar.style.height = ch + "px";
+      const h = Math.max(24, Math.round(ch * ch / sh));
+      const y = Math.round((ch - h) * box.scrollTop / (sh - ch));
+      thumb.style.height = h + "px";
+      thumb.style.transform = `translateY(${y}px)`;
+    };
+    const rest = () => { clearTimeout(fade); fade = setTimeout(() => { if (!bar.matches(":hover") && !bar.classList.contains("drag")) bar.classList.remove("on"); }, 900); };
+    box.addEventListener("scroll", () => { place(); if (bar.hidden) return; bar.classList.add("on"); rest(); }, { passive: true });
+    bar.addEventListener("pointerleave", rest);
+    // a click on the bar off the thumb pages the box toward it, as a Mac's does
+    bar.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      if (e.target !== thumb) {
+        const r = thumb.getBoundingClientRect();
+        box.scrollTop += (e.clientY < r.top ? -1 : 1) * box.clientHeight * 0.9;
+        return;
+      }
+      bar.setPointerCapture(e.pointerId);
+      bar.classList.add("drag");
+      const y0 = e.clientY, top0 = box.scrollTop;
+      const per = (box.scrollHeight - box.clientHeight) / Math.max(1, box.clientHeight - thumb.offsetHeight);
+      const move = (m) => { box.scrollTop = top0 + (m.clientY - y0) * per; };
+      const end = () => {
+        bar.removeEventListener("pointermove", move);
+        bar.removeEventListener("pointerup", end);
+        bar.removeEventListener("pointercancel", end);
+        if (bar.hasPointerCapture(e.pointerId)) bar.releasePointerCapture(e.pointerId);
+        bar.classList.remove("drag");
+        rest();
+      };
+      bar.addEventListener("pointermove", move);
+      bar.addEventListener("pointerup", end);
+      bar.addEventListener("pointercancel", end);
+    });
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(place);
+      ro.observe(box);
+      new MutationObserver(() => { for (const c of box.children) ro.observe(c); place(); }).observe(box, { childList: true, subtree: true });
+    }
+    addEventListener("resize", place);
+    place();
+  }
+}
 // the sidebar's button in the title bar, as a Mac app has it, at every
 // width; ⌃⌘S as the Mac's View menu has it
 function renderSideToggle() {
@@ -23096,13 +23620,20 @@ function toggleSideNav() {
 // the two layouts trade places as one motion (app.css .nav-morph): the old
 // drawn and the new laid out, the sidebar sliding and each tab flying to
 // its place in the other; a webview without view transitions, or a reader
-// who asked for less motion, has the new at once
+// who asked for less motion, has the new at once. So does the Linux app:
+// WebKitGTK with compositing off (webkit_linux.go turns it off under
+// Wayland) crashes in a view transition, the click on the sidebar's button
+// taking the window down (depravity_wings on X). Anywhere else, a transition
+// still going well past its half second is cut short, so a webview that
+// never ends one can't leave the window on the old layout's picture
+var MORPH_MAX = 1500;
 function navMorph(change) {
-  if (navCalm() || !document.startViewTransition) { change(); return; }
+  if (navCalm() || !document.startViewTransition || document.body.classList.contains("linux")) { change(); return; }
   const root = document.documentElement;
   root.classList.add("nav-morph");
   const vt = document.startViewTransition(change);
-  vt.finished.finally(() => root.classList.remove("nav-morph"));
+  const stuck = setTimeout(() => vt.skipTransition(), MORPH_MAX);
+  vt.finished.finally(() => { clearTimeout(stuck); root.classList.remove("nav-morph"); });
 }
 // where the page shown keeps its own tabs: the sidebar lists them under it
 // and picks them there, the page's own strip hidden (app.css)
@@ -23277,6 +23808,7 @@ if (mode === "window") {
   layoutNav();
   $("#sideToggle").onclick = toggleSideNav;
   sideDrag($("#sideEdge"));
+  sideBars();
   if (!web) addEventListener("keydown", (e) => {
     const mac = /^Mac/.test(navigator.platform);
     const mod = mac ? e.metaKey && e.ctrlKey && !e.shiftKey : e.ctrlKey && e.shiftKey && !e.metaKey;

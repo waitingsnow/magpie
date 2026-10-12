@@ -76,7 +76,9 @@ line; agents connected to magpie lose it when it quits.
   (`magpie visible <agent> --only-picked`, back with `--show-new`). A
   model asked for by name still works either way.
 - **Profiles.** Snapshot every agent's settings under a name and switch all of
-  them back in one move.
+  them back in one move. The profile in use, the one applying would change
+  nothing, is ticked, the tray panel's Profiles button shows its name, and
+  `magpie profiles` marks it ✓.
 - **Real logos, no framework.** Plain HTML over the system webview; brand
   icons from [lobehub/icons](https://github.com/lobehub/lobe-icons).
 
@@ -589,6 +591,19 @@ address with sharing on, not at loopback. A proxy here that signs its
 clients in itself can be trusted with `MAGPIE_TRUST_PROXY=1`, which keeps
 what it forwards local, as before.
 
+To let other computers in only from some addresses, list them as IPs and
+CIDR ranges in **Settings → Network and sharing → Allowed addresses**, or in
+`MAGPIE_ALLOW_IPS` (`203.0.113.7,10.0.0.0/8,2001:db8::/32`), which comes
+first. A request from any other address is refused 403, even with an
+enabled gateway key, and the refusal names the address it came from. This
+computer is always let in. The address is the connection's own, never a
+forwarding header, so behind a proxy or tunnel every client has the proxy's
+address: limit them at the proxy. A mistyped entry in `MAGPIE_ALLOW_IPS`
+lets nothing in rather than everything. When settings.json can't be read, or
+doesn't parse and has no good backup, the list read last stays in force; if
+none was read since magpie started, only this computer is let in until the
+file is repaired. `magpie web`'s page honours the same list.
+
 **Usage → Overview → Gateway keys** groups calls by the client's key, never
 the provider's credential. **Usage → Requests** offers the same filter;
 CSV includes `caller_key_id` and `caller_key_name`. Deleted keys keep their
@@ -999,8 +1014,13 @@ numbers are kept, and are what its models take once it is serving again.
 A window is a number agents are shown **and a routing input**: at 95% of the
 window a request held on a routing-group member moves to one that takes more,
 so overstating a window makes that move happen too late. A reply limit is
-advertised in `/models` and is what a group advertises the smallest of; the
-gateway does not itself cap a reply by it.
+advertised in `/models` and is what a group advertises the smallest of. The
+gateway doesn't lower a limit an agent sends by it. A request that names none
+and goes to Anthropic's Messages API, which needs one (Codex's Responses turns,
+a Chat client's), is sent it as `max_tokens`, within the window as agents are
+told it. Only a model whose limit nobody knows goes at 16384. A reply that
+runs into it ends with `stop_reason: max_tokens`, which a Responses client
+reads as `incomplete_details.reason: "max_output_tokens"` (#1792).
 
 Saving a window or a reply limit writes that number into the model lists magpie
 keeps in the agents' own files — Pi's `contextWindow` and `maxTokens`, OpenCode's
@@ -1110,9 +1130,20 @@ or Z.ai, MiniMax Coding Plan, OpenCode Go, Command Code — is weighed by its
 plan's windows the same way. With one key or account, the Routing page still
 shows what it has left. `stays=` is how long a conversation
 stays with the key or account that answered it: `auto` (the default, while
-the vendor's cache of it is worth keeping), `session`, `turn` or `off`.
+the vendor's cache of it is worth keeping), `session`, `turn`, `off` or
+`strict` (never moved to another key or account, even past its usage cap:
+its errors go to the agent).
 `models=` replaces the whole list, in order; a bare model id works when only
 one provider serves it.
+
+`listed=no` (the group editor's **Model lists: The group alone**) keeps the
+models a group names, and those its patterns match, out of `magpie models`,
+`/v1/models` and every agent's list, so a client offers the group alone.
+They are still served: the group routes over them, and a request naming one
+as `provider/model` is answered. A group in it keeps its own setting, and a
+group switched off keeps nothing out. `listed=yes` lists them again. To keep
+a whole provider for groups, use its **Only through routing groups** switch
+instead.
 
 A group can also be of decision models alone (Jev and the like: TypeSafe's,
 Bailian's `decision-model-preview`, a plugin's marked models) — never mixed
@@ -1202,7 +1233,9 @@ result for every request: who went first, and why.
    across turns while at least 1,024 tokens of the last request were read
    from the vendor's cache and it answered in the last 5 minutes. This
    never brings back an account that is resting, nor one that has used 98%
-   of a window (100% In order).
+   of a window (100% In order). *Stays: Strict* does, and asks no other:
+   the conversation stays on its account, resting, spent or past its cap,
+   and its errors go to the agent.
 
 So routing decides who goes first only for a conversation nobody has
 answered yet. An account that has used 90% goes behind the others for new
@@ -1228,6 +1261,13 @@ each of these groups ordered by the share used.
   since they end at the same midnight on every account. A Claude account
   magpie knows nothing of yet goes first once, to learn what it has left
   from the answer; any other unknown account goes after those known.
+  An account with a month beside its week (Factory) goes by its month:
+  when the month holds less than its weeks add up to (Factory's, by
+  one user's readings, about two weeks' worth), what a week leaves isn't
+  lost at the week's reset, as the
+  month still has it to spend later. Its row
+  on the Routing page says the fullest window's share with when that
+  window renews: "32% used · renews in 3 days" is the week's.
 - **In order**: the accounts in their order. The first takes every request
   until it is used up (100%) or fails.
 - **In turn**: each turn of a conversation goes to the next account. A new
@@ -1981,7 +2021,13 @@ For S3:
 - The access key needs to read and write `<prefix>/magpie/`. On AWS it also
   needs to list the bucket.
 - A server without conditional writes is supported. There magpie checks the
-  object's ETag just before each write.
+  object's ETag just before each write. Two computers that write in the
+  same moment can both pass that check (Aliyun OSS, #1776), and the later
+  write is the one kept. The other computer notices at its next sync, a
+  few minutes later. It finds a file other than the one it wrote, so it
+  merges again from before its own write: what it changed goes back up
+  beside the other computer's change. It never takes the other's file as
+  having seen its own.
 - Shared usage is reconciled only after a complete S3 listing. A missing or
   repeated continuation token, or a listing still truncated after 100 pages,
   reports a sync error and keeps previously downloaded usage days in place.

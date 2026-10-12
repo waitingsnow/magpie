@@ -56,9 +56,10 @@ type Model struct {
 	// Output is the most tokens a reply may hold, when known.
 	Output int `json:",omitempty"`
 	// Compact is where the user has Codex compact a conversation on this
-	// model (#876), its own or its provider's (settings.ModelCompacts): the
-	// window it is told when Context is longer. 0 is none set, for the
-	// one for every model (settings.Compact).
+	// model (#876), its own or its provider's (settings.ModelCompacts), or
+	// Context itself when that is a window the user typed (#1809,
+	// provider.CompactFor): the window it is told when Context is longer.
+	// 0 is none set, for the one for every model (settings.Compact).
 	Compact int `json:",omitempty"`
 	// Plain, on a model of another magpie's list, is its name there alone
 	// (display_name), when Name is its label there, with that magpie's
@@ -287,6 +288,9 @@ type mdModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	ReleaseDate string `json:"release_date"`
+	// Family is the line models.dev puts the model in (gpt-sol, mimo):
+	// the levels a new one it lists without any most likely takes
+	Family      string `json:"family"`
 	Temperature *bool  `json:"temperature"` // false: rejects temperature/top_p
 	Thinks      bool   `json:"reasoning"`
 	Reasoning   []struct {
@@ -326,18 +330,68 @@ func (m mdModel) efforts() []string {
 	return out
 }
 
+// levels are the reasoning levels p gives m: its own, else, for one it
+// says thinks but lists without levels — a model just added, as OpenAI's
+// gpt-6.1-sol was (NextCommit on Discord) — those of the newest of p's
+// thinking models of its family released by then (gpt-6-sol's). A family
+// whose models all take a thinking switch alone (Xiaomi's mimo) gives
+// none, as before (#214).
+func (p mdProvider) levels(m mdModel) []string {
+	if e := m.efforts(); len(e) > 0 || !m.Thinks || m.Family == "" || m.budgeted() {
+		return e
+	}
+	var kin *mdModel
+	for _, x := range p.Models {
+		if x.Family != m.Family || !x.Thinks || x.ID == m.ID || len(x.efforts()) == 0 {
+			continue
+		}
+		if m.ReleaseDate != "" && x.ReleaseDate > m.ReleaseDate {
+			continue
+		}
+		if kin == nil || x.ReleaseDate > kin.ReleaseDate || x.ReleaseDate == kin.ReleaseDate && x.ID > kin.ID {
+			kin = &x
+		}
+	}
+	if kin == nil {
+		return nil
+	}
+	return kin.efforts()
+}
+
 // window is the tokens a prompt to m may hold: the input limit where
 // models.dev gives one (gpt-5's 272K of its 400K), else the whole context.
 // A row whose input limit sits above its window (Cloudflare AI Gateway's
 // gpt-5 at 272K over 128K) holds the window: the cap never exceeds it.
+//
+// Either limit under LeastWindow says nothing (Window), so the other one
+// answers, or none does.
 func (m mdModel) window() int {
-	if m.Limit.Input > 0 {
-		if m.Limit.Context > 0 && m.Limit.Context < m.Limit.Input {
-			return m.Limit.Context
+	in, ctx := Window(m.Limit.Input), Window(m.Limit.Context)
+	if in > 0 {
+		if ctx > 0 && ctx < in {
+			return ctx
 		}
-		return m.Limit.Input
+		return in
 	}
-	return m.Limit.Context
+	return ctx
+}
+
+// LeastWindow is the smallest context window a list is taken at its word
+// for. Less can't hold an agent's system prompt, let alone a turn, and an
+// agent told it compacts at once or won't send at all (H20 on Discord: hy3
+// and Cline's free models listed at 512, which Claude Code and Codex took
+// as the model's window). The smallest real chat models' windows are
+// about 4096 (gpt-3.5-turbo-instruct's 4095, mythomax's 4096): those stand.
+const LeastWindow = 2048
+
+// Window is n as a model's context window: n, or 0 — not known, for
+// models.dev, a family's window or the agent's default to answer — when n
+// is under LeastWindow.
+func Window(n int) int {
+	if n < LeastWindow {
+		return 0
+	}
+	return n
 }
 
 var modelsDevURL = "https://models.dev/api.json" // a var for tests
@@ -734,7 +788,7 @@ func Provider(id string) []Model {
 		mm := Model{ID: m.ID, Name: m.Name, Provider: id, Released: m.ReleaseDate, Price: m.Cost, Temperature: m.Temperature,
 			Images: slices.Contains(m.Modalities.Input, "image"), ImageInput: imageInput(m.Modalities.Input), Context: m.window(), Output: m.Limit.Output,
 			InputModalities: m.Modalities.Input, OutputModalities: m.Modalities.Output}
-		mm.Efforts = m.efforts()
+		mm.Efforts = p.levels(m)
 		mm.Reasoning = m.Thinks || len(mm.Efforts) > 0
 		out = append(out, mm)
 	}
@@ -1007,13 +1061,63 @@ func ListedBy(providers []string, id string) ([]string, bool) {
 				if bareID(key) != want {
 					continue
 				}
-				if e := m.efforts(); len(e) > 0 || !m.budgeted() {
+				if e := all[pid].levels(m); len(e) > 0 || !m.budgeted() {
 					return slices.Clone(e), true
 				}
 			}
 		}
 	}
 	return nil, false
+}
+
+// KinEfforts are the reasoning levels of a model none of the providers
+// named lists, taken from the newest of their thinking models of the same
+// name but for its version (gpt-6.1-sol's from gpt-6-sol, mimo-v2.7-flash's
+// from mimo-v2.6-flash): a model newer than the catalog on this machine
+// offers its line's levels, not none. False when none of them has one.
+func KinEfforts(providers []string, id string) ([]string, bool) {
+	all := load()
+	shape, ok := versionless(bareID(id))
+	if !ok {
+		return nil, false
+	}
+	var (
+		levels             []string
+		newest, from, name string
+		found              bool
+	)
+	for _, pid := range providers {
+		for key, m := range all[pid].Models {
+			if !m.Thinks && len(m.efforts()) == 0 || m.budgeted() {
+				continue
+			}
+			if s, ok := versionless(bareID(key)); !ok || s != shape {
+				continue
+			}
+			// the newest; of two the same day, the first provider's, then
+			// the greater id, whatever order the map gives
+			if !found || m.ReleaseDate > newest || m.ReleaseDate == newest && pid == from && key > name {
+				levels, newest, from, name, found = all[pid].levels(m), m.ReleaseDate, pid, key, true
+			}
+		}
+	}
+	return slices.Clone(levels), found
+}
+
+// versionless is a model id with each of its version parts (6.1, v2.6) as
+// "#", and whether it has one beside a name: gpt-#-sol.
+func versionless(b string) (string, bool) {
+	parts := strings.Split(b, "-")
+	versioned, named := false, false
+	for i, s := range parts {
+		v := strings.TrimPrefix(s, "v")
+		if v != "" && strings.Trim(v, "0123456789.") == "" && v[0] != '.' {
+			parts[i], versioned = "#", true
+		} else {
+			named = true
+		}
+	}
+	return strings.Join(parts, "-"), versioned && named
 }
 
 // budgeted reports whether models.dev says the model takes a thinking
@@ -1255,6 +1359,39 @@ func parseCodex(b []byte) ([]Model, error) {
 func MagpieAdded(etag, slug, description string) bool {
 	return strings.HasSuffix(description, " via magpie") ||
 		strings.Contains(etag, "+magpie-") && strings.Contains(slug, "/")
+}
+
+// EffortRank orders the reasoning levels agents and vendors name, weakest
+// first.
+var EffortRank = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+
+// NearestEffort is the level of levels nearest want in EffortRank's order,
+// a tie going up, never "none" unless it is want; want itself when levels
+// are none, hold it, or want is no level EffortRank knows. The gateway
+// fits an effort to a model's levels by it on the way out (fitEffort), and
+// Codex's catalog gives a model the effort set for new sessions by it
+// (codexcat.ModelDefault), so the level a model starts at is the one it
+// would be sent at.
+func NearestEffort(want string, levels []string) string {
+	at := slices.Index(EffortRank, want)
+	if len(levels) == 0 || at < 0 || slices.Contains(levels, want) {
+		return want
+	}
+	best, dist := want, len(EffortRank)
+	for _, l := range levels {
+		i := slices.Index(EffortRank, l)
+		if i < 0 || l == "none" {
+			continue
+		}
+		d := i - at
+		if d < 0 {
+			d = -d
+		}
+		if d < dist || d == dist && i > at {
+			best, dist = l, d
+		}
+	}
+	return best
 }
 
 // Efforts returns the reasoning levels a model supports, if known.

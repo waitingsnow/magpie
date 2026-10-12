@@ -116,8 +116,10 @@ var (
 	creditWords = regexp.MustCompile(`(?i)insufficient.?(balance|credit|fund)|balance|credit|billing|payment|arrear|overdue|suspended|余额|欠费|充值|账户.*(不足|停)`)
 	// brokeWords: a 429 that says the balance itself is spent, as Zhipu
 	// answers a GLM Coding Plan's key at the pay-as-you-go endpoint (1113
-	// "余额不足或无可用资源包，请充值") — out of credit, not a rate limit
-	brokeWords = regexp.MustCompile(`(?i)insufficient.?(balance|credit|fund)|余额不足|欠费|请充值`)
+	// "余额不足或无可用资源包，请充值") — out of credit, not a rate limit;
+	// WorkBuddy's 429 14018 "Credits exhausted. Please visit the link
+	// below to purchase add-on packs…" too (Creat.wu on Discord)
+	brokeWords = regexp.MustCompile(`(?i)insufficient.?(balance|credit|fund)|\bcredits? (are )?exhausted\b|余额不足|欠费|请充值`)
 	// quotaWords: it has used up what its plan allows for now.
 	usedUpWords = regexp.MustCompile(`(?i)quota|usage.?limit|out of budget|budget (exceeded|exhausted)|limit.?reached|hit your .*limit|limit.{0,24}resets|exceeded.*(plan|limit)|额度|用量|套餐|上限`)
 	// rateWords: a 429 that is a short rate limit — requests or tokens per
@@ -285,6 +287,10 @@ func failure(status int, body []byte) string {
 // as failure says, and rests as before.
 func failureOf(c candidate, status int, body []byte) string {
 	if status >= 400 && c.p.Account != nil && c.p.Account.Agent == "claude" && provider.ClaudeSignInRequired(string(body)) {
+		return failAuth
+	}
+	// a subscription's sign-in its vendor revoked (#1793): no wait mends it
+	if provider.RevokedAccount(c.p.Account) && provider.SignInRevoked(status, body) {
 		return failAuth
 	}
 	return failure(status, body)
@@ -481,6 +487,10 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		// the account is as good as it was; the proxy is the user's to start
 		return r
 	}
+	if why == failCredit || why == failQuota {
+		// the vendor's words, for quotaHeld to give again
+		r.said = provider.APIError(body, http.StatusText(status))
+	}
 	switch why {
 	case failCredit:
 		d, r.By = creditRest, "credit"
@@ -494,6 +504,11 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		// "in 59 minutes", the resets_at turned Retry-After and cut to an
 		// hour, then was tried, refused and benched again)
 		d, r.By = quotaRest, "quota"
+		if own := c.p.QuotaRestFor(); own > 0 {
+			// as long as the user set for this provider (#1772: Ollama
+			// Cloud's weekly limit says nothing of when it renews)
+			d = own
+		}
 		if w := resetsAt(body, now); w > 0 {
 			d, r.By = w, "resets"
 		} else if w := resetsNoted(header, now); w > 0 {
@@ -565,6 +580,15 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	// models is the model's limit: the others still answer (WorkBuddy's
 	// "您也可以切换其他模型继续使用", #1669)
 	if pooled || unserved || why == failQuota && resetsWhen.Match(wordsOf(body)) && otherModels.Match(wordsOf(body)) {
+		id = c.restID()
+	}
+	// out of credit, or of a quota, on a model that costs credits where
+	// the subscription serves other models free is that model's: the free
+	// ones draw on no credits, and the account still serves them (Creat.wu
+	// on Discord: WorkBuddy AI's 14018 "Credits exhausted" on glm-5.3-flash
+	// rested the account, and its free models went nowhere). A free model
+	// the vendor refuses all the same rests on its own refusal.
+	if (why == failCredit || why == failQuota) && c.p.PaidBesideFree(c.model) {
 		id = c.restID()
 	}
 	r.Key = id
@@ -758,9 +782,12 @@ func (c candidate) allowanceKey() allowanceKey {
 type left struct {
 	used   float64
 	renews []time.Time
-	soon   []time.Time // renews as Smart ranks them (Allowance.Renewal)
-	pace   float64     // weekly pace: share of its week left per hour until it renews
-	due    time.Time   // when the window that pace went by renews; zero when not known
+	// fullest: when the window used is the share of renews
+	// (Allowance.Fullest), zero when not known
+	fullest time.Time
+	soon    []time.Time // renews as Smart ranks them (Allowance.Renewal)
+	pace    float64     // weekly pace: share of its week left per hour until it renews
+	due     time.Time   // when the window that pace went by renews; zero when not known
 	// restarts: when an auto-used reset starts its windows again
 	// (Allowance.Restarts), zero when none will; dueRestart: due is that,
 	// sooner than the window renews by itself
@@ -821,7 +848,7 @@ func weighRouted(p provider.Provider, cs []candidate, model string, from provide
 			pc, due := a.Pace(c.model, now)
 			amt, of, unit := a.Count(c.model, now)
 			rs := a.Restarts(now)
-			wg.lefts[c.allowanceKey()] = left{used: u, renews: r, soon: a.Renewal(c.model, now), pace: pc, due: due, amount: amt, of: of, unit: unit,
+			wg.lefts[c.allowanceKey()] = left{used: u, renews: r, fullest: a.Fullest(c.model, now), soon: a.Renewal(c.model, now), pace: pc, due: due, amount: amt, of: of, unit: unit,
 				restarts: rs, dueRestart: !rs.IsZero() && due.Equal(rs)} // one not known counts as unused
 		}
 	}

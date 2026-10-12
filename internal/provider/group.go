@@ -45,13 +45,20 @@ func GroupIDOf(ref string) (string, bool) {
 // Affinities are how long a conversation stays with the key or account that
 // answered it: "" auto, as long as what the vendor cached of it is worth
 // keeping; for the whole session; within a turn only, free to move when
-// the user speaks again; or never.
-var Affinities = []string{"", AffinitySession, AffinityTurn, AffinityOff}
+// the user speaks again; never; or strictly: for the whole session, never
+// moved to another key or account however it answers (#1797).
+var Affinities = []string{"", AffinitySession, AffinityTurn, AffinityOff, AffinityStrict}
 
 const (
 	AffinitySession = "session"
 	AffinityTurn    = "turn"
 	AffinityOff     = "off"
+	// AffinityStrict keeps a conversation on the key or account that
+	// answered it whatever happens: resting, all but used up or past the
+	// usage cap set on it, it is still the one asked, and its error goes
+	// to the agent rather than the conversation to another. A usage cap
+	// still keeps new conversations off it.
+	AffinityStrict = "strict"
 )
 
 // EffortAuto is a group whose classifier picks each turn's reasoning
@@ -210,6 +217,13 @@ type Group struct {
 	// Family is a tag the group goes by in which agents are shown it
 	// (settings' Visible), with its id.
 	Family string `json:"family,omitempty"`
+	// Unlists keeps the models the group names, or its patterns match,
+	// out of the lists agents and the gateway's model list show (#1783):
+	// they are offered through the group alone, as a provider kept for
+	// routing groups offers its own (Provider.Unlisted), and a request
+	// naming one is still served. A group in it keeps its own, as it
+	// says. Not while the group is switched off.
+	Unlists bool `json:"unlists,omitempty"`
 	// Auto is set on a group magpie found: one model served by several
 	// providers. It is derived, never stored.
 	Auto bool `json:"auto,omitempty"`
@@ -819,7 +833,7 @@ func groupEntries(entries []Entry) []Entry {
 		}
 		ruledEntry(&e, g.Live(), ms, entries)
 		if g.Context > 0 {
-			e.Context = g.Context
+			e.Context, e.WindowSet = g.Context, true
 		} else if g.Context == ContextSmallest && smallest > 0 {
 			e.Context = smallest
 		}

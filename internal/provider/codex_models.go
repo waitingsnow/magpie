@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -164,7 +163,7 @@ func SawCodexClient(h http.Header) {
 // PATH it looks where npm, nvm, bun, volta, pnpm, mise and the standalone
 // installer put it, which a desktop app's PATH lacks.
 var codexExecutable = func() string {
-	if p, err := exec.LookPath("codex"); err == nil {
+	if p, err := proc.LookPath("codex"); err == nil {
 		return p
 	}
 	names := []string{"codex"}
@@ -493,6 +492,12 @@ func codexListTag(kind string) string {
 	if v := settings.Load().CodexAutoReview; v != "" {
 		ms = append(ms, catalog.Model{ID: "~autoreview:" + v})
 	}
+	// and the effort new sessions start at, which magpie's models take as
+	// their default (codexcat.ModelDefault): another one set, Codex asks
+	// for the list again
+	if v := codexcat.NewSessionEffort(); v != "" {
+		ms = append(ms, catalog.Model{ID: "~effort:" + v})
+	}
 	return codexcat.PolicyTag(kind + codexcat.Tag(ms))
 }
 
@@ -576,7 +581,7 @@ func codexListed(shown []Entry, members func(id string) []Member, own bool) []ca
 			continue
 		}
 		m := catalog.Model{ID: e.ID, Name: labels[i], Efforts: e.Efforts, Images: e.Images || seen, Context: e.Context, AgentsV2: e.AgentsV2}
-		m.Compact = compactSet(s, e.ID, find)
+		m.Compact = CompactFor(s, e, find)
 		CodexTiers(&m, e, members)
 		ms = append(ms, m)
 	}
